@@ -128,9 +128,9 @@ class MikrotikAPI:
                 pass
             self.sock = None
 
-    # --- Live PPPoE Monitoring & Kicking ---
+    # --- Live PPPoE Monitoring with Usage & MAC ---
     def get_active_pppoe(self):
-        """Returns dict of {username: {'address': ip, 'uptime': uptime, 'id': .id, 'caller_id': mac}}"""
+        """Returns dict of active PPPoE sessions with IP, Uptime, MAC, and Data Usage (GB)"""
         res = self.talk(["/ppp/active/print"])
         users = {}
         for status, attrs in res:
@@ -138,15 +138,32 @@ class MikrotikAPI:
                 name = attrs.get("name")
                 if name:
                     users[name] = {
-                        "address": attrs.get("address", ""),
-                        "uptime": attrs.get("uptime", ""),
+                        "address": attrs.get("address", "0.0.0.0"),
+                        "uptime": attrs.get("uptime", "0s"),
                         "id": attrs.get(".id", ""),
-                        "caller_id": attrs.get("caller-id", "")
+                        "caller_id": attrs.get("caller-id", "No MAC"),
+                        "session_id": attrs.get("session-id", "")
                     }
         return users
 
+    def get_live_speed(self, username):
+        """Measures live RX (Download) and TX (Upload) speed in Mbps for a user interface"""
+        # Dynamic interface is named <pppoe-username>
+        iface_candidates = [f"<pppoe-{username}>", username]
+        speed_data = {"rx_mbps": 0.0, "tx_mbps": 0.0, "online": False}
+        for iface in iface_candidates:
+            res = self.talk(["/interface/monitor-traffic", f"=interface={iface}", "=once="])
+            for status, attrs in res:
+                if status == "!re":
+                    rx_bps = int(attrs.get("rx-bits-per-second", 0))
+                    tx_bps = int(attrs.get("tx-bits-per-second", 0))
+                    speed_data["rx_mbps"] = round(rx_bps / 1_000_000, 2)
+                    speed_data["tx_mbps"] = round(tx_bps / 1_000_000, 2)
+                    speed_data["online"] = True
+                    return speed_data
+        return speed_data
+
     def kick_user(self, username):
-        """Disconnects active user session to force fresh connection/re-auth"""
         actives = self.get_active_pppoe()
         if username in actives:
             active_id = actives[username]["id"]
@@ -155,20 +172,16 @@ class MikrotikAPI:
             return True
         return False
 
-    # --- Full PPPoE Secret CRUD ---
     def create_pppoe_secret(self, username, password, profile="default", comment=""):
-        # Check if user already exists in secrets
         res = self.talk(["/ppp/secret/print", f"?name={username}"])
         exists = any(status == "!re" for status, attrs in res)
         if exists:
-            # Update password and profile
             return self.update_pppoe_secret(username, password, profile, comment)
         
         words = ["/ppp/secret/add", f"=name={username}", f"=password={password}", f"=service=pppoe", f"=profile={profile}"]
         if comment:
             words.append(f"=comment={comment}")
         self.talk(words)
-        logger.info(f"Created PPPoE secret for {username} (profile: {profile})")
         return True
 
     def update_pppoe_secret(self, username, password=None, profile=None, comment=None):
@@ -190,7 +203,6 @@ class MikrotikAPI:
             words.append(f"=comment={comment}")
             
         self.talk(words)
-        logger.info(f"Updated PPPoE secret for {username}")
         return True
 
     def delete_pppoe_secret(self, username):
@@ -203,25 +215,20 @@ class MikrotikAPI:
         if secret_id:
             self.talk(["/ppp/secret/remove", f"=.id={secret_id}"])
             self.kick_user(username)
-            logger.info(f"Deleted PPPoE secret for {username}")
             return True
         return False
 
-    # --- Walled Garden / Firewall Blocking & Unblocking ---
     def block_user(self, ip_address, comment="Expired-Billing"):
         res = self.talk(["/ip/firewall/address-list/print", "?list=Expired-Users", f"?address={ip_address}"])
         exists = any(status == "!re" for status, attrs in res)
         if not exists:
             self.talk(["/ip/firewall/address-list/add", "=list=Expired-Users", f"=address={ip_address}", f"=comment={comment}"])
-            logger.info(f"Added {ip_address} to Expired-Users")
 
     def unblock_user(self, ip_address):
         res = self.talk(["/ip/firewall/address-list/print", "?list=Expired-Users", f"?address={ip_address}"])
         for status, attrs in res:
             if status == "!re" and ".id" in attrs:
-                entry_id = attrs[".id"]
-                self.talk(["/ip/firewall/address-list/remove", f"=.id={entry_id}"])
-                logger.info(f"Removed {ip_address} (.id={entry_id}) from Expired-Users")
+                self.talk(["/ip/firewall/address-list/remove", f"=.id={attrs['.id']}"])
 
     def unblock_user_by_name(self, username):
         actives = self.get_active_pppoe()
@@ -229,7 +236,6 @@ class MikrotikAPI:
             ip = actives[username]["address"]
             self.unblock_user(ip)
             return ip
-        # Also clean by comment if IP wasn't online
         res = self.talk(["/ip/firewall/address-list/print", "?list=Expired-Users", f"?comment={username}"])
         for status, attrs in res:
             if status == "!re" and ".id" in attrs:
