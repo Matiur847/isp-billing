@@ -12,6 +12,8 @@ from mikrotik import MikrotikAPI
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("billing_app")
 
+COMPANY_NAME = "সাইফুল ডিস এন্ড ইন্টারনেট 🛜"
+
 def get_mikrotik_conn():
     host = database.get_setting("mikrotik_host")
     port = int(database.get_setting("mikrotik_port", 35105))
@@ -106,7 +108,13 @@ def parse_bkash_sms(text: str):
         return trx_id, amount, sender
     return None, None, None
 
-# 1. SMS Webhook Endpoint (Called by MacroDroid)
+# Real-time Auto-Suggest Search API
+@app.get("/api/search")
+async def api_search(q: str = ""):
+    results = database.search_customers(q, limit=8)
+    return results
+
+# SMS Webhook Endpoint
 @app.post("/api/sms-webhook")
 async def sms_webhook(request: Request):
     text = ""
@@ -121,7 +129,6 @@ async def sms_webhook(request: Request):
         text = body_bytes.decode("utf-8", errors="replace")
         
     logger.info(f"Incoming SMS Webhook: {text}")
-    
     trx_id, amount, sender = parse_bkash_sms(text)
     if trx_id and amount:
         success = database.record_payment(trx_id, amount, sender, text)
@@ -133,7 +140,7 @@ async def sms_webhook(request: Request):
             
     return {"status": "ignored", "message": "Not a recognized bKash Send Money SMS"}
 
-# 2. Customer Portal UI
+# Customer Portal UI with Live Dropdown Search
 @app.get("/", response_class=HTMLResponse)
 async def customer_portal(query: Optional[str] = None, user_id: Optional[int] = None):
     bkash_num = database.get_setting("bkash_number", "01859734056")
@@ -153,31 +160,34 @@ async def customer_portal(query: Optional[str] = None, user_id: Optional[int] = 
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>ইন্টারনেট বিল পরিশোধ ও রিচার্জ পোর্টাল</title>
+        <title>{COMPANY_NAME} - বিল পরিশোধ পোর্টাল</title>
         <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
         <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
         <style>
-            body {{ background: #f4f7fa; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }}
-            .card {{ border-radius: 16px; box-shadow: 0 10px 30px rgba(0,0,0,0.06); border: none; }}
-            .bkash-badge {{ background-color: #e2136e; color: white; border-radius: 10px; padding: 10px 20px; font-weight: bold; letter-spacing: 0.8px; display: inline-block; }}
-            .header-banner {{ background: linear-gradient(135deg, #0d6efd, #0052cc); color: white; padding: 28px; border-radius: 16px 16px 0 0; text-align: center; }}
+            body {{ background: #f0f4f9; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }}
+            .card {{ border-radius: 18px; box-shadow: 0 12px 35px rgba(0,0,0,0.07); border: none; }}
+            .bkash-badge {{ background-color: #e2136e; color: white; border-radius: 12px; padding: 12px 22px; font-weight: bold; letter-spacing: 0.8px; display: inline-block; }}
+            .header-banner {{ background: linear-gradient(135deg, #0d6efd, #004ecc); color: white; padding: 30px 20px; border-radius: 18px 18px 0 0; text-align: center; }}
+            .dropdown-item-hover:hover {{ background-color: #eef5ff; cursor: pointer; }}
         </style>
     </head>
     <body class="py-4">
-        <div class="container" style="max-width: 520px;">
+        <div class="container" style="max-width: 530px;">
             <div class="card mb-4">
                 <div class="header-banner">
-                    <h3 class="mb-1 fw-bold"><i class="fa-solid fa-bolt me-2"></i>ডিজিটাল ইন্টারনেট বিলিং</h3>
-                    <p class="mb-0 opacity-75">বিকাশ দিয়ে অটোমেটিক ইনস্ট্যান্ট রিচার্জ</p>
+                    <h3 class="mb-1 fw-bold">{COMPANY_NAME}</h3>
+                    <p class="mb-0 opacity-75 fs-6">বিকাশ দিয়ে অটোমেটিক ইনস্ট্যান্ট রিচার্জ</p>
                 </div>
                 
                 <div class="card-body p-4">
-                    <form method="GET" action="/" class="mb-3">
+                    <form method="GET" action="/" class="mb-3 position-relative" autocomplete="off">
                         <label class="form-label fw-bold">গ্রাহকের নাম, ইউজার আইডি বা মোবাইল নম্বর:</label>
                         <div class="input-group">
-                            <input type="text" name="query" class="form-control form-control-lg" placeholder="যেমন: MRF15J বা নাম বা মোবাইল" value="{query or ''}" required>
+                            <input type="text" id="searchInput" name="query" class="form-control form-control-lg" placeholder="যেমন: anisur বা azam বা 017..." value="{query or ''}" required>
                             <button class="btn btn-primary px-4 fw-bold" type="submit"><i class="fa-solid fa-magnifying-glass me-1"></i> সার্চ</button>
                         </div>
+                        <!-- Live Floating Search Dropdown -->
+                        <div id="searchResults" class="list-group shadow position-absolute w-100 mt-1 d-none" style="z-index: 1050; max-height: 280px; overflow-y: auto;"></div>
                     </form>
     """
     
@@ -215,7 +225,7 @@ async def customer_portal(query: Optional[str] = None, user_id: Optional[int] = 
         <div class="alert alert-light border mb-4">
             <h5 class="fw-bold text-primary mb-3"><i class="fa-solid fa-id-card me-2"></i>গ্রাহকের তথ্য:</h5>
             <div class="d-flex justify-content-between py-1 border-bottom">
-                <span>গ্রাহকের নাম:</span> <span class="fw-bold">{display_name}</span>
+                <span>গ্রাহকের নাম:</span> <span class="fw-bold fs-6">{display_name}</span>
             </div>
             <div class="d-flex justify-content-between py-1 border-bottom">
                 <span>ইউজার আইডি:</span> <span class="fw-bold">{c['username']}</span>
@@ -261,14 +271,63 @@ async def customer_portal(query: Optional[str] = None, user_id: Optional[int] = 
     html += f"""
                 </div>
             </div>
-            <p class="text-center text-muted small">© ISP Automation System | হেল্পলাইন: {bkash_num}</p>
+            <p class="text-center text-muted small">© {COMPANY_NAME} | হেল্পলাইন: {bkash_num}</p>
         </div>
+
+        <!-- Live Auto-Suggest Script -->
+        <script>
+            const searchInput = document.getElementById('searchInput');
+            const searchResults = document.getElementById('searchResults');
+
+            if (searchInput && searchResults) {{
+                searchInput.addEventListener('input', async function() {{
+                    const q = this.value.trim();
+                    if (q.length < 1) {{
+                        searchResults.classList.add('d-none');
+                        searchResults.innerHTML = '';
+                        return;
+                    }}
+                    try {{
+                        const res = await fetch('/api/search?q=' + encodeURIComponent(q));
+                        const data = await res.json();
+                        if (data.length === 0) {{
+                            searchResults.innerHTML = '<div class="list-group-item text-muted small p-3">কোনো মিল পাওয়া যায়নি</div>';
+                            searchResults.classList.remove('d-none');
+                            return;
+                        }}
+                        let html = '';
+                        data.forEach(item => {{
+                            const name = item.name || item.username;
+                            html += `
+                            <a href="/?user_id=${{item.id}}" class="list-group-item list-group-item-action d-flex justify-content-between align-items-center p-3 dropdown-item-hover">
+                                <div>
+                                    <div class="fw-bold text-primary">${{name}}</div>
+                                    <small class="text-muted">আইডি: ${{item.username}} ${{item.phone ? '| মোবাইল: ' + item.phone : ''}}</small>
+                                </div>
+                                <span class="badge bg-primary rounded-pill">সিলেক্ট করুন ➔</span>
+                            </a>
+                            `;
+                        }});
+                        searchResults.innerHTML = html;
+                        searchResults.classList.remove('d-none');
+                    }} catch (e) {{
+                        console.error(e);
+                    }}
+                }});
+
+                document.addEventListener('click', function(e) {{
+                    if (!searchInput.contains(e.target) && !searchResults.contains(e.target)) {{
+                        searchResults.classList.add('d-none');
+                    }}
+                }});
+            }}
+        </script>
     </body>
     </html>
     """
     return html
 
-# 3. Process Customer Payment & Instantly Trigger MikroTik API
+# Process Customer Payment
 @app.post("/api/pay", response_class=HTMLResponse)
 async def process_payment(background_tasks: BackgroundTasks, username: str = Form(...), trx_id: str = Form(...)):
     success, message = database.verify_and_apply_payment(username, trx_id)
@@ -288,7 +347,7 @@ async def process_payment(background_tasks: BackgroundTasks, username: str = For
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>পেমেন্ট স্ট্যাটাস</title>
+        <title>{COMPANY_NAME} - পেমেন্ট স্ট্যাটাস</title>
         <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     </head>
     <body class="bg-light py-5">
@@ -307,7 +366,7 @@ async def process_payment(background_tasks: BackgroundTasks, username: str = For
     """
     return html
 
-# 4. Modern SaaS Admin Dashboard with Complete CRUD & Live MikroTik Actions
+# Admin Dashboard
 @app.get("/admin", response_class=HTMLResponse)
 async def admin_dashboard(edit_id: Optional[int] = None):
     customers = database.get_all_customers()
@@ -327,7 +386,6 @@ async def admin_dashboard(edit_id: Optional[int] = None):
             edit_cust = dict(row)
     conn.close()
     
-    # Check MikroTik online status
     mikrotik_status_badge = '<span class="badge bg-success"><i class="fa-solid fa-circle-check me-1"></i> MikroTik Online</span>'
     actives = {}
     try:
@@ -337,14 +395,13 @@ async def admin_dashboard(edit_id: Optional[int] = None):
     except Exception:
         mikrotik_status_badge = '<span class="badge bg-danger"><i class="fa-solid fa-triangle-exclamation me-1"></i> MikroTik Offline</span>'
 
-    # Customer rows
     cust_rows = ""
     for c in customers:
         uname = c["username"]
         is_online = uname in actives
         online_badge = f'<span class="badge bg-success" title="IP: {actives[uname]["address"]} | Uptime: {actives[uname]["uptime"]}">● Online</span>' if is_online else '<span class="badge bg-secondary">○ Offline</span>'
         status_badge = '<span class="badge bg-success">Active</span>' if c["status"] == "active" else '<span class="badge bg-danger">Expired</span>'
-        display_name = c["name"] if c["name"] else '<span class="text-muted">নাম দেওয়া হয়নি</span>'
+        display_name = c["name"] if c["name"] else c["username"]
         
         cust_rows += f"""
         <tr>
@@ -372,7 +429,6 @@ async def admin_dashboard(edit_id: Optional[int] = None):
         </tr>
         """
 
-    # Payment rows
     pay_rows = ""
     for p in payments:
         used_badge = '<span class="badge bg-secondary">Used</span>' if p["status"] == "used" else '<span class="badge bg-success">Unused</span>'
@@ -387,7 +443,6 @@ async def admin_dashboard(edit_id: Optional[int] = None):
         </tr>
         """
 
-    # Edit Form Modal/Card
     edit_form_html = ""
     if edit_cust:
         edit_form_html = f"""
@@ -406,7 +461,7 @@ async def admin_dashboard(edit_id: Optional[int] = None):
                         </div>
                         <div class="col-md-3">
                             <label class="form-label fw-bold">গ্রাহকের আসল নাম</label>
-                            <input type="text" name="name" class="form-control" value="{edit_cust['name'] or ''}" placeholder="যেমন: মোঃ রফিকুল ইসলাম">
+                            <input type="text" name="name" class="form-control" value="{edit_cust['name'] or ''}" placeholder="যেমন: আনিসুর">
                         </div>
                         <div class="col-md-2">
                             <label class="form-label fw-bold">মোবাইল নম্বর</label>
@@ -455,13 +510,13 @@ async def admin_dashboard(edit_id: Optional[int] = None):
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>ISP Cloud Billing & MikroTik Admin Dashboard</title>
+        <title>{COMPANY_NAME} - Admin Dashboard</title>
         <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
         <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
         <style>
             body {{ background: #f8fafc; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }}
-            .card {{ border-radius: 12px; border: none; box-shadow: 0 4px 12px rgba(0,0,0,0.03); }}
-            .stat-card {{ border-radius: 12px; padding: 20px; color: white; }}
+            .card {{ border-radius: 14px; border: none; box-shadow: 0 4px 14px rgba(0,0,0,0.03); }}
+            .stat-card {{ border-radius: 14px; padding: 22px; color: white; }}
         </style>
     </head>
     <body class="p-3 p-md-4">
@@ -469,7 +524,7 @@ async def admin_dashboard(edit_id: Optional[int] = None):
             <!-- Header Bar -->
             <div class="d-flex flex-wrap justify-content-between align-items-center mb-4 pb-2 border-bottom">
                 <div>
-                    <h3 class="fw-bold mb-1"><i class="fa-solid fa-network-wired text-primary me-2"></i>ISP Management & Billing Portal</h3>
+                    <h3 class="fw-bold mb-1"><i class="fa-solid fa-satellite-dish text-primary me-2"></i>{COMPANY_NAME}</h3>
                     <div class="d-flex align-items-center gap-2">
                         {mikrotik_status_badge}
                         <span class="badge bg-dark"><i class="fa-solid fa-mobile-screen me-1 text-danger"></i> বিকাশ: {bkash_num}</span>
@@ -537,21 +592,20 @@ async def admin_dashboard(edit_id: Optional[int] = None):
 
             <!-- Main Tables -->
             <div class="row g-4">
-                <!-- Customer List Table -->
                 <div class="col-lg-8">
                     <div class="card shadow-sm">
                         <div class="card-header bg-white py-3 d-flex justify-content-between align-items-center">
                             <h5 class="fw-bold mb-0 text-primary"><i class="fa-solid fa-list-check me-2"></i>গ্রাহক তালিকা ({len(customers)} জন)</h5>
-                            <input type="text" id="custSearch" class="form-control form-control-sm w-auto" placeholder="খুঁজুন..." onkeyup="filterCustomers()">
+                            <input type="text" id="custSearch" class="form-control form-control-sm w-auto" placeholder="তালিকায় খুঁজুন..." onkeyup="filterCustomers()">
                         </div>
                         <div class="card-body p-0 table-responsive">
                             <table class="table table-hover table-striped align-middle mb-0" id="customersTable">
                                 <thead class="table-light">
                                     <tr>
-                                        <th>PPPoE ইউজার</th>
+                                        <th>PPPoE আইডি</th>
                                         <th>গ্রাহকের নাম ও মোবাইল</th>
                                         <th>মাসিক বিল</th>
-                                        <th>মেয়াদ (Expirty)</th>
+                                        <th>মেয়াদ (Expiry)</th>
                                         <th>স্ট্যাটাস</th>
                                         <th class="text-center">অ্যাকশন</th>
                                     </tr>
@@ -564,7 +618,6 @@ async def admin_dashboard(edit_id: Optional[int] = None):
                     </div>
                 </div>
 
-                <!-- bKash Logs Table -->
                 <div class="col-lg-4">
                     <div class="card shadow-sm">
                         <div class="card-header bg-white py-3">
@@ -606,7 +659,7 @@ async def admin_dashboard(edit_id: Optional[int] = None):
                                 </div>
                                 <div class="col-md-6">
                                     <label class="form-label fw-bold">গ্রাহকের আসল নাম</label>
-                                    <input type="text" name="name" class="form-control" placeholder="যেমন: মোঃ আল-আমিন">
+                                    <input type="text" name="name" class="form-control" placeholder="যেমন: আনিসুর">
                                 </div>
                                 <div class="col-md-6">
                                     <label class="form-label fw-bold">মোবাইল নম্বর</label>
@@ -658,7 +711,7 @@ async def admin_dashboard(edit_id: Optional[int] = None):
     """
     return html
 
-# --- CRUD Actions (Called from Admin Dashboard) ---
+# --- CRUD Actions ---
 
 @app.post("/admin/create-customer")
 async def create_customer_action(background_tasks: BackgroundTasks, username: str = Form(...), password: str = Form(...),
@@ -666,7 +719,6 @@ async def create_customer_action(background_tasks: BackgroundTasks, username: st
                                  package_price: int = Form(525), profile: str = Form("default"), days_valid: int = Form(30)):
     success, err = database.create_customer(username, password, name, phone, package_name, package_price, profile, days_valid)
     if success:
-        # Sync to MikroTik PPPoE secret in background
         background_tasks.add_task(sync_secret_to_mikrotik, username, password, profile)
     return RedirectResponse(url="/admin", status_code=303)
 
@@ -678,7 +730,6 @@ async def update_customer_action(background_tasks: BackgroundTasks, cust_id: int
     database.update_customer_full(cust_id, name, phone, password, package_name, package_price, profile, expiry_date, status)
     cust = database.get_customer_by_id(cust_id)
     if cust:
-        # Update secret in MikroTik
         background_tasks.add_task(sync_secret_to_mikrotik, cust["username"], password, profile)
         if status == "active":
             background_tasks.add_task(unblock_in_mikrotik, cust["username"])
