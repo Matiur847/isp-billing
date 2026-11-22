@@ -3,8 +3,7 @@ import datetime
 import logging
 from typing import Optional
 from fastapi import FastAPI, Request, Form, BackgroundTasks
-from fastapi.responses import HTMLResponse, JSONResponse
-from fastapi.templating import Jinja2Templates
+from fastapi.responses import HTMLResponse, RedirectResponse
 from contextlib import asynccontextmanager
 
 import database
@@ -83,15 +82,13 @@ def parse_bkash_sms(text: str):
         return trx_id, amount, sender
     return None, None, None
 
-# 1. SMS Webhook Endpoint (Called by Android SMS Forwarder)
+# 1. SMS Webhook Endpoint (Called by MacroDroid)
 @app.post("/api/sms-webhook")
 async def sms_webhook(request: Request):
-    # Support both JSON and Form payload from various SMS Forwarder apps
     text = ""
     try:
         body = await request.json()
         if isinstance(body, dict):
-            # Check common keys: content, msg, message, text, body
             text = body.get("content") or body.get("msg") or body.get("message") or body.get("text") or body.get("body") or str(body)
         else:
             text = str(body)
@@ -114,10 +111,18 @@ async def sms_webhook(request: Request):
 
 # 2. Customer Portal UI
 @app.get("/", response_class=HTMLResponse)
-async def customer_portal(user: Optional[str] = None):
-    bkash_num = database.get_setting("bkash_number", "01786821788")
-    cust_info = database.get_customer(user) if user else None
+async def customer_portal(query: Optional[str] = None, user_id: Optional[int] = None):
+    bkash_num = database.get_setting("bkash_number", "01859734056")
+    selected_customer = None
+    search_results = []
     
+    if user_id:
+        selected_customer = database.get_customer_by_id(user_id)
+    elif query:
+        search_results = database.search_customers(query)
+        if len(search_results) == 1:
+            selected_customer = search_results[0]
+            
     html = f"""
     <!DOCTYPE html>
     <html lang="bn">
@@ -129,7 +134,7 @@ async def customer_portal(user: Optional[str] = None):
         <style>
             body {{ background: #f0f4f8; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }}
             .card {{ border-radius: 15px; box-shadow: 0 8px 24px rgba(0,0,0,0.08); border: none; }}
-            .bkash-badge {{ background-color: #e2136e; color: white; border-radius: 8px; padding: 6px 14px; font-weight: bold; }}
+            .bkash-badge {{ background-color: #e2136e; color: white; border-radius: 8px; padding: 8px 16px; font-weight: bold; letter-spacing: 0.5px; }}
             .header-banner {{ background: linear-gradient(135deg, #0d6efd, #0b5ed7); color: white; padding: 25px; border-radius: 15px 15px 0 0; text-align: center; }}
         </style>
     </head>
@@ -143,36 +148,61 @@ async def customer_portal(user: Optional[str] = None):
                 
                 <div class="card-body p-4">
                     <form method="GET" action="/" class="mb-3">
-                        <label class="form-label fw-bold">আপনার ইউজার আইডি (PPPoE Username):</label>
+                        <label class="form-label fw-bold">গ্রাহকের নাম, ইউজার আইডি অথবা মোবাইল নম্বর:</label>
                         <div class="input-group">
-                            <input type="text" name="user" class="form-control form-control-lg" placeholder="যেমন: MRF107" value="{user or ''}" required>
-                            <button class="btn btn-primary px-4" type="submit">সার্চ করুন</button>
+                            <input type="text" name="query" class="form-control form-control-lg" placeholder="যেমন: MRF15J বা নাম বা মোবাইল" value="{query or ''}" required>
+                            <button class="btn btn-primary px-4 fw-bold" type="submit">সার্চ করুন</button>
                         </div>
                     </form>
     """
     
-    if user and not cust_info:
+    if query and not search_results and not selected_customer:
         html += """
         <div class="alert alert-danger">
-            ❌ এই ইউজার আইডিটি পাওয়া যায়নি! দয়া করে সঠিক ইউজার আইডি দিন অথবা অ্যাডমিনের সাথে যোগাযোগ করুন।
+            ❌ এই নাম বা আইডিতে কোনো গ্রাহক পাওয়া যায়নি! সঠিক নাম বা ইউজার আইডি লিখুন অথবা অ্যাডমিনের সাথে যোগাযোগ করুন।
         </div>
         """
-    elif cust_info:
-        status_badge = '<span class="badge bg-success">সচল (Active)</span>' if cust_info['status'] == 'active' else '<span class="badge bg-danger">মেয়াদ শেষ (Expired)</span>'
+    elif len(search_results) > 1 and not selected_customer:
+        html += """
+        <div class="alert alert-info">
+            🔍 একাধিক গ্রাহক পাওয়া গেছে! আপনার প্রোফাইলটি সিলেক্ট করুন:
+        </div>
+        <div class="list-group mb-4">
+        """
+        for c in search_results:
+            display_name = c['name'] if c['name'] else c['username']
+            html += f"""
+            <a href="/?user_id={c['id']}" class="list-group-item list-group-item-action d-flex justify-content-between align-items-center p-3">
+                <div>
+                    <h6 class="mb-1 fw-bold text-primary">{display_name}</h6>
+                    <small class="text-muted">ID: {c['username']} | মোবাইল: {c['phone'] or 'নাই'}</small>
+                </div>
+                <span class="badge bg-primary rounded-pill">পেমেন্ট করুন ➔</span>
+            </a>
+            """
+        html += "</div>"
+        
+    elif selected_customer:
+        c = selected_customer
+        status_badge = '<span class="badge bg-success">সচল (Active)</span>' if c['status'] == 'active' else '<span class="badge bg-danger">মেয়াদ শেষ (Expired)</span>'
+        display_name = c['name'] if c['name'] else c['username']
         html += f"""
         <div class="alert alert-light border mb-4">
             <h5 class="fw-bold text-primary mb-2">👤 গ্রাহকের তথ্য:</h5>
             <div class="d-flex justify-content-between py-1 border-bottom">
-                <span>ইউজার আইডি:</span> <span class="fw-bold">{cust_info['username']}</span>
+                <span>গ্রাহকের নাম:</span> <span class="fw-bold">{display_name}</span>
             </div>
             <div class="d-flex justify-content-between py-1 border-bottom">
-                <span>প্যাকেজ:</span> <span class="fw-bold">{cust_info['package_name']}</span>
+                <span>ইউজার আইডি:</span> <span class="fw-bold">{c['username']}</span>
             </div>
             <div class="d-flex justify-content-between py-1 border-bottom">
-                <span>মাসিক বিল:</span> <span class="fw-bold text-danger fs-5">{cust_info['package_price']} ৳</span>
+                <span>প্যাকেজ:</span> <span class="fw-bold">{c['package_name']}</span>
             </div>
             <div class="d-flex justify-content-between py-1 border-bottom">
-                <span>বর্তমান মেয়াদ:</span> <span class="fw-bold">{cust_info['expiry_date']}</span>
+                <span>মাসিক বিল:</span> <span class="fw-bold text-danger fs-5">{c['package_price']} ৳</span>
+            </div>
+            <div class="d-flex justify-content-between py-1 border-bottom">
+                <span>বর্তমান মেয়াদ:</span> <span class="fw-bold">{c['expiry_date']}</span>
             </div>
             <div class="d-flex justify-content-between py-1">
                 <span>স্ট্যাটাস:</span> <span>{status_badge}</span>
@@ -183,19 +213,19 @@ async def customer_portal(user: Optional[str] = None):
             <h6 class="fw-bold text-dark mb-2">📱 বিকাশ পেমেন্ট নির্দেশিকা:</h6>
             <ol class="small ps-3 mb-2 text-secondary">
                 <li>আপনার বিকাশ অ্যাপে গিয়ে <b>Send Money</b> অপশনে যান।</li>
-                <li>নিচের নাম্বারে <b>{cust_info['package_price']} টাকা</b> পাঠান:</li>
+                <li>নিচের পার্সোনাল বিকাশ নাম্বারে <b>{c['package_price']} টাকা</b> পাঠান:</li>
             </ol>
-            <div class="text-center my-2">
+            <div class="text-center my-3">
                 <span class="bkash-badge fs-5">bKash: {bkash_num} (Personal)</span>
             </div>
-            <small class="text-muted text-center d-block">টাকা পাঠানোর পর বিকাশ থেকে পাওয়া <b>TrxID</b> নিচে লিখুন।</small>
+            <small class="text-muted text-center d-block">টাকা পাঠানোর পর ফিরতি SMS থেকে প্রাপ্ত <b>TrxID</b> নিচে লিখুন।</small>
         </div>
 
         <form method="POST" action="/api/pay">
-            <input type="hidden" name="username" value="{cust_info['username']}">
+            <input type="hidden" name="username" value="{c['username']}">
             <div class="mb-3">
                 <label class="form-label fw-bold">বিকাশ TrxID দিন:</label>
-                <input type="text" name="trx_id" class="form-control form-control-lg text-uppercase" placeholder="যেমন: DKG1JU47Y7" required>
+                <input type="text" name="trx_id" class="form-control form-control-lg text-uppercase fw-bold" placeholder="যেমন: DKG1JU47Y7" required>
             </div>
             <button type="submit" class="btn btn-success btn-lg w-100 fw-bold">
                 🚀 পেমেন্ট নিশ্চিত ও নেট চালু করুন
@@ -203,22 +233,21 @@ async def customer_portal(user: Optional[str] = None):
         </form>
         """
 
-    html += """
+    html += f"""
                 </div>
             </div>
-            <p class="text-center text-muted small">© ISP Automation System | যেকোনো সমস্যায় যোগাযোগ: 01786821788</p>
+            <p class="text-center text-muted small">© ISP Automation System | যেকোনো প্রয়োজনে: {bkash_num}</p>
         </div>
     </body>
     </html>
     """
     return html
 
-# 3. Process Customer Payment & Instantly Trigger MikroTik API
+# 3. Process Payment & MikroTik Trigger
 @app.post("/api/pay", response_class=HTMLResponse)
 async def process_payment(background_tasks: BackgroundTasks, username: str = Form(...), trx_id: str = Form(...)):
     success, message = database.verify_and_apply_payment(username, trx_id)
     if success:
-        # Trigger MikroTik unblock in background task
         background_tasks.add_task(unblock_in_mikrotik, username)
         alert_class = "alert-success"
         icon = "🎉"
@@ -226,7 +255,7 @@ async def process_payment(background_tasks: BackgroundTasks, username: str = For
     else:
         alert_class = "alert-danger"
         icon = "⚠️"
-        heading = "পেমেন্ট ব্যর্থ হয়েছে!"
+        heading = "পেমেন্ট সম্পন্ন হয়নি!"
         
     html = f"""
     <!DOCTYPE html>
@@ -245,7 +274,7 @@ async def process_payment(background_tasks: BackgroundTasks, username: str = For
                 <div class="alert {alert_class} text-start">
                     {message}
                 </div>
-                <a href="/?user={username}" class="btn btn-primary mt-2">ফিরে যান</a>
+                <a href="/?query={username}" class="btn btn-primary mt-2 fw-bold">ফিরে যান</a>
             </div>
         </div>
     </body>
@@ -253,9 +282,9 @@ async def process_payment(background_tasks: BackgroundTasks, username: str = For
     """
     return html
 
-# 4. Admin Dashboard
+# 4. Admin Management Dashboard
 @app.get("/admin", response_class=HTMLResponse)
-async def admin_dashboard():
+async def admin_dashboard(edit_id: Optional[int] = None):
     conn = database.get_db()
     cur = conn.cursor()
     cur.execute("SELECT * FROM customers ORDER BY expiry_date ASC")
@@ -263,18 +292,80 @@ async def admin_dashboard():
     
     cur.execute("SELECT * FROM payments ORDER BY id DESC LIMIT 20")
     payments = cur.fetchall()
+    
+    edit_cust = None
+    if edit_id:
+        cur.execute("SELECT * FROM customers WHERE id = ?", (edit_id,))
+        edit_cust = cur.fetchone()
+        
     conn.close()
     
+    bkash_num = database.get_setting("bkash_number", "01859734056")
+    
+    # Edit customer modal/card if edit_id is selected
+    edit_form_html = ""
+    if edit_cust:
+        edit_form_html = f"""
+        <div class="card shadow-sm border-primary mb-4">
+            <div class="card-header bg-primary text-white fw-bold">
+                ✏️ গ্রাহকের তথ্য এডিট করুন: {edit_cust['username']}
+            </div>
+            <div class="card-body">
+                <form method="POST" action="/admin/update-customer">
+                    <input type="hidden" name="cust_id" value="{edit_cust['id']}">
+                    <div class="row g-3">
+                        <div class="col-md-3">
+                            <label class="form-label fw-bold">ইউজার আইডি (PPPoE)</label>
+                            <input type="text" class="form-control" value="{edit_cust['username']}" disabled>
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label fw-bold">গ্রাহকের আসল নাম</label>
+                            <input type="text" name="name" class="form-control" value="{edit_cust['name'] or ''}" placeholder="যেমন: মোঃ রফিকুল ইসলাম">
+                        </div>
+                        <div class="col-md-2">
+                            <label class="form-label fw-bold">মোবাইল নম্বর</label>
+                            <input type="text" name="phone" class="form-control" value="{edit_cust['phone'] or ''}" placeholder="017xxxxxxxx">
+                        </div>
+                        <div class="col-md-2">
+                            <label class="form-label fw-bold">মাসিক বিল (৳)</label>
+                            <input type="number" name="package_price" class="form-control" value="{edit_cust['package_price']}">
+                        </div>
+                        <div class="col-md-2">
+                            <label class="form-label fw-bold">মেয়াদ (YYYY-MM-DD)</label>
+                            <input type="date" name="expiry_date" class="form-control" value="{edit_cust['expiry_date']}">
+                        </div>
+                        <div class="col-md-2">
+                            <label class="form-label fw-bold">স্ট্যাটাস</label>
+                            <select name="status" class="form-select">
+                                <option value="active" {"selected" if edit_cust['status']=='active' else ''}>Active</option>
+                                <option value="expired" {"selected" if edit_cust['status']=='expired' else ''}>Expired</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="mt-3">
+                        <button type="submit" class="btn btn-success fw-bold px-4">সংরক্ষণ করুন (Save)</button>
+                        <a href="/admin" class="btn btn-secondary px-3">বাতিল</a>
+                    </div>
+                </form>
+            </div>
+        </div>
+        """
+        
     cust_rows = ""
     for c in customers:
         badge = "badge bg-success" if c["status"] == "active" else "badge bg-danger"
+        display_name = c['name'] if c['name'] else '<span class="text-muted">নাম দেওয়া হয়নি</span>'
         cust_rows += f"""
         <tr>
-            <td>{c['username']}</td>
+            <td><b>{c['username']}</b></td>
+            <td>{display_name}</td>
             <td>{c['phone'] or '-'}</td>
             <td>{c['package_price']} ৳</td>
             <td>{c['expiry_date']}</td>
             <td><span class="{badge}">{c['status']}</span></td>
+            <td>
+                <a href="/admin?edit_id={c['id']}" class="btn btn-sm btn-outline-primary">এডিট</a>
+            </td>
         </tr>
         """
         
@@ -294,7 +385,7 @@ async def admin_dashboard():
 
     html = f"""
     <!DOCTYPE html>
-    <html>
+    <html lang="bn">
     <head>
         <meta charset="UTF-8">
         <title>ISP Admin Billing Dashboard</title>
@@ -302,16 +393,27 @@ async def admin_dashboard():
     </head>
     <body class="bg-light p-4">
         <div class="container-fluid">
-            <h2 class="mb-4">⚙️ ISP Billing Admin Dashboard</h2>
+            <div class="d-flex justify-content-between align-items-center mb-4">
+                <h2>⚙️ ISP Billing Admin Dashboard</h2>
+                <div>
+                    <span class="badge bg-dark fs-6 me-2">বিকাশ পার্সোনাল: {bkash_num}</span>
+                    <a href="/" target="_blank" class="btn btn-primary fw-bold">গ্রাহক পোর্টাল দেখুন ➔</a>
+                </div>
+            </div>
+            
+            {edit_form_html}
             
             <div class="row">
-                <div class="col-md-7">
+                <div class="col-md-8">
                     <div class="card shadow-sm mb-4">
-                        <div class="card-header bg-primary text-white fw-bold">👥 গ্রাহক তালিকা ({len(customers)} Users)</div>
+                        <div class="card-header bg-primary text-white fw-bold d-flex justify-content-between">
+                            <span>👥 গ্রাহক তালিকা ({len(customers)} জন)</span>
+                            <small>গ্রাহকের আসল নাম ও আসল মেয়াদ সেট করতে 'এডিট' চাপুন</small>
+                        </div>
                         <div class="card-body p-0">
-                            <table class="table table-hover mb-0">
+                            <table class="table table-hover table-striped mb-0">
                                 <thead>
-                                    <tr><th>Username</th><th>Phone</th><th>Price</th><th>Expiry</th><th>Status</th></tr>
+                                    <tr><th>PPPoE ID</th><th>আসল নাম</th><th>মোবাইল</th><th>বিল</th><th>মেয়াদ</th><th>স্ট্যাটাস</th><th>অ্যাকশন</th></tr>
                                 </thead>
                                 <tbody>
                                     {cust_rows}
@@ -321,13 +423,13 @@ async def admin_dashboard():
                     </div>
                 </div>
                 
-                <div class="col-md-5">
+                <div class="col-md-4">
                     <div class="card shadow-sm mb-4">
-                        <div class="card-header bg-dark text-white fw-bold">💰 সাম্প্রতিক বিকাশ পেমেন্ট (Last 20)</div>
+                        <div class="card-header bg-dark text-white fw-bold">💰 সাম্প্রতিক বিকাশ SMS ও TrxID</div>
                         <div class="card-body p-0">
                             <table class="table table-sm table-hover mb-0">
                                 <thead>
-                                    <tr><th>TrxID</th><th>টাকা</th><th>নম্বর</th><th>সময়</th><th>স্ট্যাটাস</th><th>ব্যবহৃত</th></tr>
+                                    <tr><th>TrxID</th><th>টাকা</th><th>নম্বর</th><th>স্ট্যাটাস</th><th>ইউজার</th></tr>
                                 </thead>
                                 <tbody>
                                     {pay_rows}
@@ -343,7 +445,12 @@ async def admin_dashboard():
     """
     return html
 
-# 5. Daily Expiry Check Trigger
+@app.post("/admin/update-customer")
+async def update_customer(cust_id: int = Form(...), name: str = Form(""), phone: str = Form(""), 
+                          package_price: int = Form(525), expiry_date: str = Form(...), status: str = Form("active")):
+    database.update_customer_details(cust_id, name, phone, package_price, expiry_date, status)
+    return RedirectResponse(url="/admin", status_code=303)
+
 @app.get("/api/cron/check-expiry")
 async def trigger_expiry_check():
     check_expired_users_task()

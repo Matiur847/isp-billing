@@ -18,13 +18,21 @@ def init_db():
     CREATE TABLE IF NOT EXISTS customers (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         username TEXT UNIQUE NOT NULL,
-        phone TEXT,
-        package_name TEXT DEFAULT 'Standard',
-        package_price INTEGER DEFAULT 500,
+        name TEXT DEFAULT '',
+        phone TEXT DEFAULT '',
+        package_name TEXT DEFAULT '25 Mbps',
+        package_price INTEGER DEFAULT 525,
         expiry_date TEXT,
         status TEXT DEFAULT 'active'
     )
     """)
+    
+    # Try adding columns if existing database had older schema
+    for col, col_type in [("name", "TEXT DEFAULT ''"), ("phone", "TEXT DEFAULT ''")]:
+        try:
+            cur.execute(f"ALTER TABLE customers ADD COLUMN {col} {col_type}")
+        except Exception:
+            pass
     
     # Payments table
     cur.execute("""
@@ -51,7 +59,7 @@ def init_db():
     
     # Initial settings
     default_settings = {
-        "bkash_number": "01786821788",
+        "bkash_number": "01859734056",
         "admin_password": "admin",
         "mikrotik_host": "remote1.dslabbd.com",
         "mikrotik_port": "35105",
@@ -59,22 +67,28 @@ def init_db():
         "mikrotik_pass": "matiur847@#"
     }
     for k, v in default_settings.items():
-        cur.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
+        cur.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (k, v))
         
-    # Pre-seed 21 users with expiry set to 30 days from now if table empty
-    cur.execute("SELECT COUNT(*) FROM customers")
-    if cur.fetchone()[0] == 0:
-        default_users = [
-            "Anisur97", "Azam55", "Babu85", "MR@obaidul", "MR@sarul", "MRF11", "MRF15J",
-            "MRF107", "MRF117", "MRF141", "MRF200S", "Mamidul01", "Mizan", "Moynul",
-            "Owab1234", "Primary-school", "Rafi81", "Romana005", "Sahinur-74", "Shofik1", "juyel1"
-        ]
-        next_month = (datetime.date.today() + datetime.timedelta(days=30)).isoformat()
-        for u in default_users:
+    # Pre-seed 21 users with 25 Mbps, 525 Tk if not already present
+    default_users = [
+        "Anisur97", "Azam55", "Babu85", "MR@obaidul", "MR@sarul", "MRF11", "MRF15J",
+        "MRF107", "MRF117", "MRF141", "MRF200S", "Mamidul01", "Mizan", "Moynul",
+        "Owab1234", "Primary-school", "Rafi81", "Romana005", "Sahinur-74", "Shofik1", "juyel1"
+    ]
+    next_month = (datetime.date.today() + datetime.timedelta(days=30)).isoformat()
+    for u in default_users:
+        cur.execute("SELECT id FROM customers WHERE username = ?", (u,))
+        row = cur.fetchone()
+        if not row:
             cur.execute("""
-            INSERT INTO customers (username, package_name, package_price, expiry_date, status)
-            VALUES (?, '10 Mbps', 500, ?, 'active')
-            """, (u, next_month))
+            INSERT INTO customers (username, name, package_name, package_price, expiry_date, status)
+            VALUES (?, ?, '25 Mbps', 525, ?, 'active')
+            """, (u, u, next_month))
+        else:
+            # Update default package and price
+            cur.execute("""
+            UPDATE customers SET package_name = '25 Mbps', package_price = 525 WHERE username = ?
+            """, (u,))
             
     conn.commit()
     conn.close()
@@ -111,30 +125,63 @@ def record_payment(trx_id, amount, sender_phone, raw_sms):
     conn.close()
     return success
 
-def get_customer(query):
+def search_customers(query):
     query = query.strip()
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM customers WHERE LOWER(username) = LOWER(?) OR phone = ?", (query, query))
+    # Search by exact username, partial name, or phone
+    cur.execute("""
+    SELECT * FROM customers 
+    WHERE LOWER(username) = LOWER(?) 
+       OR phone = ? 
+       OR LOWER(name) LIKE LOWER(?)
+    """, (query, query, f"%{query}%"))
+    rows = cur.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+def get_customer_by_id(cust_id):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM customers WHERE id = ?", (cust_id,))
     row = cur.fetchone()
     conn.close()
     return dict(row) if row else None
 
-def verify_and_apply_payment(username_or_phone, trx_id):
+def get_customer_by_username(username):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM customers WHERE LOWER(username) = LOWER(?)", (username.strip(),))
+    row = cur.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+def update_customer_details(cust_id, name, phone, package_price, expiry_date, status):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+    UPDATE customers 
+    SET name = ?, phone = ?, package_price = ?, expiry_date = ?, status = ?
+    WHERE id = ?
+    """, (name.strip(), phone.strip(), int(package_price), expiry_date.strip(), status, cust_id))
+    conn.commit()
+    conn.close()
+
+def verify_and_apply_payment(username_or_id, trx_id):
     trx_id = trx_id.strip().upper()
     conn = get_db()
     cur = conn.cursor()
     
-    # 1. Check customer
-    cur.execute("SELECT * FROM customers WHERE LOWER(username) = LOWER(?) OR phone = ?", (username_or_phone.strip(), username_or_phone.strip()))
+    # Check customer by username or id
+    cur.execute("SELECT * FROM customers WHERE LOWER(username) = LOWER(?) OR id = ?", (str(username_or_id).strip(), str(username_or_id).strip()))
     cust = cur.fetchone()
     if not cust:
         conn.close()
-        return False, "কাস্টমার পাওয়া যায়নি! সঠিক ইউজারনেম বা ফোন নাম্বার দিন।"
+        return False, "কাস্টমার পাওয়া যায়নি! সঠিক ইউজার আইডি বা নাম দিন।"
         
     cust = dict(cust)
     
-    # 2. Check TrxID
+    # Check TrxID
     cur.execute("SELECT * FROM payments WHERE trx_id = ?", (trx_id,))
     payment = cur.fetchone()
     if not payment:
@@ -148,9 +195,9 @@ def verify_and_apply_payment(username_or_phone, trx_id):
         
     if payment["amount"] < cust["package_price"]:
         conn.close()
-        return False, f"টাকার পরিমাণ কম! আপনার প্যাকেজের মূল্য {cust['package_price']} টাকা, কিন্তু পেমেন্ট এসেছে {payment['amount']} টাকা।"
+        return False, f"টাকার পরিমাণ কম! আপনার প্যাকেজের বিল {cust['package_price']} টাকা, কিন্তু পেমেন্ট এসেছে {payment['amount']} টাকা।"
         
-    # 3. Calculate new expiry
+    # Calculate new expiry
     today = datetime.date.today()
     try:
         curr_expiry = datetime.date.fromisoformat(cust["expiry_date"])
