@@ -99,7 +99,6 @@ class MikrotikAPI:
         return replies
 
     def _login(self):
-        # RouterOS v6 Challenge-response MD5 or direct login
         res = self.talk(["/login", f"=name={self.user}", f"=password={self.password}"])
         for status, attrs in res:
             if status == "!done" and "ret" not in attrs:
@@ -129,22 +128,87 @@ class MikrotikAPI:
                 pass
             self.sock = None
 
-    # High-level actions
+    # --- Live PPPoE Monitoring & Kicking ---
     def get_active_pppoe(self):
-        """Returns dict of {username: ip_address}"""
+        """Returns dict of {username: {'address': ip, 'uptime': uptime, 'id': .id, 'caller_id': mac}}"""
         res = self.talk(["/ppp/active/print"])
         users = {}
         for status, attrs in res:
             if status == "!re":
                 name = attrs.get("name")
-                addr = attrs.get("address")
-                if name and addr:
-                    users[name] = addr
+                if name:
+                    users[name] = {
+                        "address": attrs.get("address", ""),
+                        "uptime": attrs.get("uptime", ""),
+                        "id": attrs.get(".id", ""),
+                        "caller_id": attrs.get("caller-id", "")
+                    }
         return users
 
+    def kick_user(self, username):
+        """Disconnects active user session to force fresh connection/re-auth"""
+        actives = self.get_active_pppoe()
+        if username in actives:
+            active_id = actives[username]["id"]
+            self.talk(["/ppp/active/remove", f"=.id={active_id}"])
+            logger.info(f"Kicked active session for {username}")
+            return True
+        return False
+
+    # --- Full PPPoE Secret CRUD ---
+    def create_pppoe_secret(self, username, password, profile="default", comment=""):
+        # Check if user already exists in secrets
+        res = self.talk(["/ppp/secret/print", f"?name={username}"])
+        exists = any(status == "!re" for status, attrs in res)
+        if exists:
+            # Update password and profile
+            return self.update_pppoe_secret(username, password, profile, comment)
+        
+        words = ["/ppp/secret/add", f"=name={username}", f"=password={password}", f"=service=pppoe", f"=profile={profile}"]
+        if comment:
+            words.append(f"=comment={comment}")
+        self.talk(words)
+        logger.info(f"Created PPPoE secret for {username} (profile: {profile})")
+        return True
+
+    def update_pppoe_secret(self, username, password=None, profile=None, comment=None):
+        res = self.talk(["/ppp/secret/print", f"?name={username}"])
+        secret_id = None
+        for status, attrs in res:
+            if status == "!re":
+                secret_id = attrs.get(".id")
+                break
+        if not secret_id:
+            return False
+            
+        words = ["/ppp/secret/set", f"=.id={secret_id}"]
+        if password:
+            words.append(f"=password={password}")
+        if profile:
+            words.append(f"=profile={profile}")
+        if comment is not None:
+            words.append(f"=comment={comment}")
+            
+        self.talk(words)
+        logger.info(f"Updated PPPoE secret for {username}")
+        return True
+
+    def delete_pppoe_secret(self, username):
+        res = self.talk(["/ppp/secret/print", f"?name={username}"])
+        secret_id = None
+        for status, attrs in res:
+            if status == "!re":
+                secret_id = attrs.get(".id")
+                break
+        if secret_id:
+            self.talk(["/ppp/secret/remove", f"=.id={secret_id}"])
+            self.kick_user(username)
+            logger.info(f"Deleted PPPoE secret for {username}")
+            return True
+        return False
+
+    # --- Walled Garden / Firewall Blocking & Unblocking ---
     def block_user(self, ip_address, comment="Expired-Billing"):
-        """Adds user IP to Expired-Users firewall address-list"""
-        # First check if already in list
         res = self.talk(["/ip/firewall/address-list/print", "?list=Expired-Users", f"?address={ip_address}"])
         exists = any(status == "!re" for status, attrs in res)
         if not exists:
@@ -152,7 +216,6 @@ class MikrotikAPI:
             logger.info(f"Added {ip_address} to Expired-Users")
 
     def unblock_user(self, ip_address):
-        """Removes user IP from Expired-Users firewall address-list"""
         res = self.talk(["/ip/firewall/address-list/print", "?list=Expired-Users", f"?address={ip_address}"])
         for status, attrs in res:
             if status == "!re" and ".id" in attrs:
@@ -161,10 +224,9 @@ class MikrotikAPI:
                 logger.info(f"Removed {ip_address} (.id={entry_id}) from Expired-Users")
 
     def unblock_user_by_name(self, username):
-        """Finds user IP from active connections and removes from Expired-Users"""
         actives = self.get_active_pppoe()
         if username in actives:
-            ip = actives[username]
+            ip = actives[username]["address"]
             self.unblock_user(ip)
             return ip
         # Also clean by comment if IP wasn't online
