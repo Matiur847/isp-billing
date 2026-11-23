@@ -1,6 +1,5 @@
 import os
 import re
-import json
 import html
 import hashlib
 import datetime
@@ -56,11 +55,10 @@ def get_block_mode() -> str:
 def unblock_in_mikrotik(username: str):
     try:
         api = get_mikrotik_conn()
-        ip = api.unblock_user_by_name(username)
+        api.unblock_user_by_name(username)
         api.close()
-        logger.info(f"MikroTik unblock executed for {username} (IP: {ip})")
     except Exception as e:
-        logger.error(f"Failed to unblock {username} in MikroTik: {e}")
+        logger.error(f"Unblock failed for {username}: {e}")
 
 
 def block_in_mikrotik(username: str, ip_address: Optional[str] = None):
@@ -68,9 +66,8 @@ def block_in_mikrotik(username: str, ip_address: Optional[str] = None):
         api = get_mikrotik_conn()
         api.block_customer(username, ip_address=ip_address, mode=get_block_mode())
         api.close()
-        logger.info(f"Blocked user {username} (mode={get_block_mode()})")
     except Exception as e:
-        logger.error(f"Failed to block {username} in MikroTik: {e}")
+        logger.error(f"Block failed for {username}: {e}")
 
 
 def enforce_expired_active_users(expired_ips: list):
@@ -81,7 +78,7 @@ def enforce_expired_active_users(expired_ips: list):
             api.block_customer(uname, ip_address=ip, mode=mode)
         api.close()
     except Exception as e:
-        logger.error(f"Failed enforcing expired users: {e}")
+        logger.error(f"Enforce expired failed: {e}")
 
 
 def sync_secret_to_mikrotik(username, password, profile="default"):
@@ -90,7 +87,7 @@ def sync_secret_to_mikrotik(username, password, profile="default"):
         api.create_pppoe_secret(username, password, profile=profile, comment="Created from Web Portal")
         api.close()
     except Exception as e:
-        logger.error(f"Failed to sync secret {username}: {e}")
+        logger.error(f"Sync secret failed {username}: {e}")
 
 
 def delete_secret_from_mikrotik(username):
@@ -99,7 +96,7 @@ def delete_secret_from_mikrotik(username):
         api.delete_pppoe_secret(username)
         api.close()
     except Exception as e:
-        logger.error(f"Failed to delete secret {username}: {e}")
+        logger.error(f"Delete secret failed {username}: {e}")
 
 
 def check_expired_users_task():
@@ -115,10 +112,9 @@ def check_expired_users_task():
             database.mark_customer_expired(uname)
             ip = actives[uname]["address"] if uname in actives else None
             api.block_customer(uname, ip_address=ip, mode=mode)
-            logger.info(f"Auto-Blocked expired user: {uname}")
         api.close()
     except Exception as e:
-        logger.error(f"Error in check_expired_users_task: {e}")
+        logger.error(f"check_expired_users_task error: {e}")
 
 
 def calculate_expiry_label(expiry_str: str, status_str: str):
@@ -133,16 +129,13 @@ def calculate_expiry_label(expiry_str: str, status_str: str):
 
     if status_str != "active" or exp_dt < now:
         diff = now - exp_dt
-        days = max(0, diff.days)
-        hours = diff.seconds // 3600
+        days, hours = max(0, diff.days), diff.seconds // 3600
         label = f"Expired {days} দিন" if days > 0 else f"Expired {hours} ঘণ্টা"
         return label, "bg-danger-subtle text-danger border border-danger-subtle", "Suspended", "bg-warning-subtle text-warning-emphasis border border-warning-subtle"
-    else:
-        diff = exp_dt - now
-        days = diff.days
-        hours = diff.seconds // 3600
-        label = f"{days} দিন left" if days > 0 else f"{hours} ঘণ্টা left"
-        return label, "bg-success-subtle text-success border border-success-subtle", "Active", "bg-success-subtle text-success border border-success-subtle"
+    diff = exp_dt - now
+    days, hours = diff.days, diff.seconds // 3600
+    label = f"{days} দিন left" if days > 0 else f"{hours} ঘণ্টা left"
+    return label, "bg-success-subtle text-success border border-success-subtle", "Active", "bg-success-subtle text-success border border-success-subtle"
 
 
 @asynccontextmanager
@@ -155,14 +148,12 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="ISP Billing, MikroTik & OLT Automation", lifespan=lifespan)
 
 
-# --- SECURE SIGNED COOKIE AUTH ---
 def _pass_hash(pwd: str) -> str:
     return hashlib.sha256(pwd.encode("utf-8")).hexdigest()[:16]
 
 
 def _get_serializer() -> URLSafeSerializer:
-    secret = database.get_setting("session_secret", "isp-default-secret-key")
-    return URLSafeSerializer(secret, salt="admin-auth")
+    return URLSafeSerializer(database.get_setting("session_secret", "isp-default-secret-key"), salt="admin-auth")
 
 
 def is_authenticated(request: Request) -> bool:
@@ -182,9 +173,7 @@ def admin_navbar(active_tab: str = "dashboard") -> str:
     def cls(t): return "btn btn-primary fw-bold" if active_tab == t else "btn btn-outline-secondary fw-bold"
     return f"""
     <div class="d-flex flex-wrap justify-content-between align-items-center mb-4 pb-3 border-bottom gap-2 bg-white p-3 rounded-3 shadow-sm">
-        <div>
-            <h4 class="fw-bold mb-0"><i class="fa-solid fa-satellite-dish text-primary me-2"></i>{company}</h4>
-        </div>
+        <div><h4 class="fw-bold mb-0"><i class="fa-solid fa-satellite-dish text-primary me-2"></i>{company}</h4></div>
         <div class="d-flex flex-wrap gap-2 align-items-center">
             <a href="/admin" class="{cls('dashboard')} btn-sm"><i class="fa-solid fa-users me-1"></i> গ্রাহক তালিকা</a>
             <a href="/admin/olt" class="{cls('olt')} btn-sm"><i class="fa-solid fa-diagram-project me-1"></i> OLT মনিটর</a>
@@ -192,23 +181,18 @@ def admin_navbar(active_tab: str = "dashboard") -> str:
             <a href="/" target="_blank" class="btn btn-outline-info btn-sm fw-bold"><i class="fa-solid fa-arrow-up-right-from-square me-1"></i> পোর্টাল</a>
             <a href="/logout" class="btn btn-outline-danger btn-sm" title="লগআউট"><i class="fa-solid fa-power-off"></i></a>
         </div>
-    </div>
-    """
+    </div>"""
 
 
 def parse_bkash_sms(text: str):
-    amount_match = re.search(r'received\s+Tk\s*([0-9,]+(?:\.[0-9]{1,2})?)', text, re.IGNORECASE)
-    trx_match = re.search(r'TrxID\s+([A-Za-z0-9]+)', text, re.IGNORECASE)
-    sender_match = re.search(r'from\s+(01[3-9][0-9]{8})', text, re.IGNORECASE)
-    if trx_match and amount_match:
-        trx_id = trx_match.group(1).upper()
-        amount = float(amount_match.group(1).replace(",", ""))
-        sender = sender_match.group(1) if sender_match else "Unknown"
-        return trx_id, amount, sender
+    amount_m = re.search(r'received\s+Tk\s*([0-9,]+(?:\.[0-9]{1,2})?)', text, re.IGNORECASE)
+    trx_m = re.search(r'TrxID\s+([A-Za-z0-9]+)', text, re.IGNORECASE)
+    sender_m = re.search(r'from\s+(01[3-9][0-9]{8})', text, re.IGNORECASE)
+    if trx_m and amount_m:
+        return trx_m.group(1).upper(), float(amount_m.group(1).replace(",", "")), (sender_m.group(1) if sender_m else "Unknown")
     return None, None, None
 
 
-# --- PUBLIC APIs ---
 @app.get("/api/search")
 async def api_search(q: str = ""):
     return database.search_customers(q, limit=8)
@@ -229,14 +213,9 @@ async def api_live_speed(username: str):
 async def sms_webhook(request: Request):
     try:
         body = await request.json()
-        if isinstance(body, dict):
-            text = body.get("content") or body.get("msg") or body.get("message") or body.get("text") or body.get("body") or str(body)
-        else:
-            text = str(body)
+        text = (body.get("content") or body.get("msg") or body.get("message") or body.get("text") or body.get("body") or str(body)) if isinstance(body, dict) else str(body)
     except Exception:
         text = (await request.body()).decode("utf-8", errors="replace")
-
-    logger.info(f"Incoming SMS Webhook: {text}")
     trx_id, amount, sender = parse_bkash_sms(text)
     if trx_id and amount:
         if database.record_payment(trx_id, amount, sender, text):
@@ -251,49 +230,19 @@ async def trigger_expiry_check():
     return {"status": "success", "message": "Expiry check executed"}
 
 
-# --- LOGIN / LOGOUT ---
 @app.get("/login", response_class=HTMLResponse)
 async def login_page(error: Optional[str] = None):
     company = h(get_company_name())
     err_html = f"<div class='alert alert-danger py-2 small'>{h(error)}</div>" if error else ""
-    return f"""<!DOCTYPE html>
-<html lang="bn">
-<head>
-    <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{company} - অ্যাডমিন লগইন</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <style>
-        body {{ background: #f0f4f9; height: 100vh; display: flex; align-items: center; justify-content: center; font-family: 'Segoe UI', sans-serif; }}
-        .card {{ border-radius: 18px; border: none; box-shadow: 0 10px 30px rgba(0,0,0,0.08); width: 100%; max-width: 400px; }}
-        .header-banner {{ background: linear-gradient(135deg, #0d6efd, #004ecc); color: white; padding: 25px; border-radius: 18px 18px 0 0; text-align: center; }}
-    </style>
-</head>
-<body>
-    <div class="card">
-        <div class="header-banner">
-            <i class="fa-solid fa-shield-halved fa-3x mb-2"></i>
-            <h4 class="fw-bold mb-1">{company}</h4>
-            <p class="mb-0 opacity-75 small">সুরক্ষিত অ্যাডমিন প্যানেল</p>
-        </div>
-        <div class="card-body p-4">
-            {err_html}
-            <form method="POST" action="/login">
-                <div class="mb-3">
-                    <label class="form-label fw-bold">অ্যাডমিন পাসওয়ার্ড:</label>
-                    <div class="input-group">
-                        <span class="input-group-text"><i class="fa-solid fa-lock"></i></span>
-                        <input type="password" name="password" class="form-control form-control-lg" placeholder="পাসওয়ার্ড লিখুন" required autofocus>
-                    </div>
-                </div>
-                <button type="submit" class="btn btn-primary btn-lg w-100 fw-bold">
-                    <i class="fa-solid fa-right-to-bracket me-2"></i> লগইন করুন
-                </button>
-            </form>
-        </div>
-    </div>
-</body>
-</html>"""
+    return f"""<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{company} - অ্যাডমিন লগইন</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+<style>body{{background:#f0f4f9;height:100vh;display:flex;align-items:center;justify-content:center;font-family:'Segoe UI',sans-serif;}}.card{{border-radius:18px;border:none;box-shadow:0 10px 30px rgba(0,0,0,0.08);width:100%;max-width:400px;}}.header-banner{{background:linear-gradient(135deg,#0d6efd,#004ecc);color:white;padding:25px;border-radius:18px 18px 0 0;text-align:center;}}</style>
+</head><body><div class="card"><div class="header-banner"><i class="fa-solid fa-shield-halved fa-3x mb-2"></i><h4 class="fw-bold mb-1">{company}</h4><p class="mb-0 opacity-75 small">সুরক্ষিত অ্যাডমিন প্যানেল</p></div>
+<div class="card-body p-4">{err_html}<form method="POST" action="/login"><div class="mb-3"><label class="form-label fw-bold">অ্যাডমিন পাসওয়ার্ড:</label>
+<div class="input-group"><span class="input-group-text"><i class="fa-solid fa-lock"></i></span><input type="password" name="password" class="form-control form-control-lg" placeholder="পাসওয়ার্ড লিখুন" required autofocus></div></div>
+<button type="submit" class="btn btn-primary btn-lg w-100 fw-bold"><i class="fa-solid fa-right-to-bracket me-2"></i> লগইন করুন</button></form></div></div></body></html>"""
 
 
 @app.post("/login")
@@ -314,17 +263,13 @@ async def do_logout():
     return response
 
 
-# --- CUSTOMER PORTAL ---
 @app.get("/", response_class=HTMLResponse)
 async def customer_portal(query: Optional[str] = None, user_id: Optional[int] = None):
     company = h(get_company_name())
     bkash_num = h(database.get_setting("bkash_number", "01XXXXXXXXX"))
-    selected_customer = None
+    selected_customer = database.get_customer_by_id(user_id) if user_id else None
     search_results = []
-
-    if user_id:
-        selected_customer = database.get_customer_by_id(user_id)
-    elif query:
+    if not selected_customer and query:
         search_results = database.search_customers(query)
         if len(search_results) == 1:
             selected_customer = database.get_customer_by_id(search_results[0]["id"])
@@ -333,117 +278,47 @@ async def customer_portal(query: Optional[str] = None, user_id: Optional[int] = 
     if query and not search_results and not selected_customer:
         body_content = '<div class="alert alert-danger">❌ এই নাম বা আইডিতে কোনো গ্রাহক পাওয়া যায়নি! সঠিক নাম বা ইউজার আইডি লিখুন।</div>'
     elif len(search_results) > 1 and not selected_customer:
-        items = ""
-        for c in search_results:
-            dname = h(c["name"] or c["username"])
-            items += f"""
-            <a href="/?user_id={c['id']}" class="list-group-item list-group-item-action d-flex justify-content-between align-items-center p-3">
-                <div><h6 class="mb-1 fw-bold text-primary">{dname}</h6>
-                <small class="text-muted">আইডি: {h(c['username'])} | মোবাইল: {h(c['phone'] or 'নাই')}</small></div>
-                <span class="badge bg-primary rounded-pill">পেমেন্ট ➔</span>
-            </a>"""
+        items = "".join(
+            f'<a href="/?user_id={c["id"]}" class="list-group-item list-group-item-action d-flex justify-content-between align-items-center p-3"><div><h6 class="mb-1 fw-bold text-primary">{h(c["name"] or c["username"])}</h6><small class="text-muted">আইডি: {h(c["username"])} | মোবাইল: {h(c["phone"] or "নাই")}</small></div><span class="badge bg-primary rounded-pill">পেমেন্ট ➔</span></a>'
+            for c in search_results
+        )
         body_content = f'<div class="alert alert-info">🔍 একাধিক গ্রাহক পাওয়া গেছে! আপনার প্রোফাইলটি সিলেক্ট করুন:</div><div class="list-group mb-4">{items}</div>'
     elif selected_customer:
         c = selected_customer
-        status_badge = '<span class="badge bg-success">সচল (Active)</span>' if c["status"] == "active" else '<span class="badge bg-danger">মেয়াদ শেষ (Expired)</span>'
-        dname = h(c["name"] or c["username"])
+        sb = '<span class="badge bg-success">সচল (Active)</span>' if c["status"] == "active" else '<span class="badge bg-danger">মেয়াদ শেষ (Expired)</span>'
         body_content = f"""
         <div class="alert alert-light border mb-4">
             <h5 class="fw-bold text-primary mb-3"><i class="fa-solid fa-id-card me-2"></i>গ্রাহকের তথ্য:</h5>
-            <div class="d-flex justify-content-between py-1 border-bottom"><span>গ্রাহকের নাম:</span><span class="fw-bold">{dname}</span></div>
+            <div class="d-flex justify-content-between py-1 border-bottom"><span>গ্রাহকের নাম:</span><span class="fw-bold">{h(c['name'] or c['username'])}</span></div>
             <div class="d-flex justify-content-between py-1 border-bottom"><span>ইউজার আইডি:</span><span class="fw-bold">{h(c['username'])}</span></div>
             <div class="d-flex justify-content-between py-1 border-bottom"><span>প্যাকেজ:</span><span class="fw-bold">{h(c['package_name'])}</span></div>
             <div class="d-flex justify-content-between py-1 border-bottom"><span>মাসিক বিল:</span><span class="fw-bold text-danger fs-5">{c['package_price']} ৳</span></div>
             <div class="d-flex justify-content-between py-1 border-bottom"><span>বর্তমান মেয়াদ:</span><span class="fw-bold">{h(c['expiry_date'])}</span></div>
-            <div class="d-flex justify-content-between py-1"><span>স্ট্যাটাস:</span><span>{status_badge}</span></div>
+            <div class="d-flex justify-content-between py-1"><span>স্ট্যাটাস:</span><span>{sb}</span></div>
         </div>
         <div class="card bg-light border-0 p-3 mb-4">
             <h6 class="fw-bold text-dark mb-2"><i class="fa-solid fa-mobile-screen me-1 text-danger"></i> বিকাশ পেমেন্ট নির্দেশিকা:</h6>
-            <ol class="small ps-3 mb-2 text-secondary">
-                <li>আপনার বিকাশ অ্যাপে গিয়ে <b>Send Money</b> অপশনে যান।</li>
-                <li>নিচের পার্সোনাল বিকাশ নাম্বারে ঠিক <b>{c['package_price']} টাকা</b> পাঠান:</li>
-            </ol>
-            <div class="text-center my-3">
-                <div class="d-inline-flex align-items-center gap-2">
-                    <span class="bkash-badge fs-5">bKash: {bkash_num}</span>
-                    <button type="button" onclick="copyBkash('{bkash_num}')" class="btn btn-sm btn-light border shadow-sm px-2" id="copyBtn"><i class="fa-regular fa-copy text-danger"></i></button>
-                </div>
-                <div class="mt-1"><small class="text-muted">Personal Number</small></div>
-            </div>
+            <ol class="small ps-3 mb-2 text-secondary"><li>আপনার বিকাশ অ্যাপে গিয়ে <b>Send Money</b> অপশনে যান।</li><li>নিচের পার্সোনাল বিকাশ নাম্বারে ঠিক <b>{c['package_price']} টাকা</b> পাঠান:</li></ol>
+            <div class="text-center my-3"><div class="d-inline-flex align-items-center gap-2"><span class="bkash-badge fs-5">bKash: {bkash_num}</span><button type="button" onclick="copyBkash('{bkash_num}')" class="btn btn-sm btn-light border shadow-sm px-2" id="copyBtn"><i class="fa-regular fa-copy text-danger"></i></button></div><div class="mt-1"><small class="text-muted">Personal Number</small></div></div>
             <small class="text-muted text-center d-block">টাকা পাঠানোর পর ফিরতি এসএমএসের <b>TrxID</b> নিচে লিখুন।</small>
         </div>
-        <form method="POST" action="/api/pay">
-            <input type="hidden" name="username" value="{h(c['username'])}">
-            <div class="mb-3">
-                <label class="form-label fw-bold">বিকাশ TrxID দিন:</label>
-                <input type="text" name="trx_id" class="form-control form-control-lg text-uppercase fw-bold" placeholder="যেমন: DKG1JU47Y7" required>
-            </div>
-            <button type="submit" class="btn btn-success btn-lg w-100 fw-bold"><i class="fa-solid fa-paper-plane me-1"></i> পেমেন্ট নিশ্চিত ও নেট চালু করুন</button>
-        </form>"""
+        <form method="POST" action="/api/pay"><input type="hidden" name="username" value="{h(c['username'])}"><div class="mb-3"><label class="form-label fw-bold">বিকাশ TrxID দিন:</label><input type="text" name="trx_id" class="form-control form-control-lg text-uppercase fw-bold" placeholder="যেমন: DKG1JU47Y7" required></div><button type="submit" class="btn btn-success btn-lg w-100 fw-bold"><i class="fa-solid fa-paper-plane me-1"></i> পেমেন্ট নিশ্চিত ও নেট চালু করুন</button></form>"""
 
-    return f"""<!DOCTYPE html>
-<html lang="bn">
-<head>
-    <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{company} - বিল পরিশোধ পোর্টাল</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <style>
-        body {{ background: #f0f4f9; font-family: 'Segoe UI', sans-serif; }}
-        .card {{ border-radius: 18px; box-shadow: 0 12px 35px rgba(0,0,0,0.07); border: none; }}
-        .bkash-badge {{ background-color: #e2136e; color: white; border-radius: 12px; padding: 12px 22px; font-weight: bold; display: inline-block; }}
-        .header-banner {{ background: linear-gradient(135deg, #0d6efd, #004ecc); color: white; padding: 30px 20px; border-radius: 18px 18px 0 0; text-align: center; }}
-    </style>
-</head>
-<body class="py-4">
-<div class="container" style="max-width: 530px;">
-    <div class="card mb-4">
-        <div class="header-banner">
-            <h3 class="mb-1 fw-bold">{company}</h3>
-            <p class="mb-0 opacity-75 fs-6">বিকাশ দিয়ে অটোমেটিক ইনস্ট্যান্ট রিচার্জ</p>
-        </div>
-        <div class="card-body p-4">
-            <form method="GET" action="/" class="mb-3 position-relative" autocomplete="off">
-                <label class="form-label fw-bold">গ্রাহকের নাম, ইউজার আইডি বা মোবাইল নম্বর:</label>
-                <div class="input-group">
-                    <input type="text" id="searchInput" name="query" class="form-control form-control-lg" placeholder="যেমন: anisur বা 017..." value="{h(query or '')}" required>
-                    <button class="btn btn-primary px-4 fw-bold" type="submit"><i class="fa-solid fa-magnifying-glass me-1"></i> সার্চ</button>
-                </div>
-                <div id="searchResults" class="list-group shadow position-absolute w-100 mt-1 d-none" style="z-index: 1050; max-height: 280px; overflow-y: auto;"></div>
-            </form>
-            {body_content}
-        </div>
-    </div>
-    <p class="text-center text-muted small">© {company} | হেল্পলাইন: {bkash_num}</p>
-</div>
+    return f"""<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{company} - বিল পরিশোধ পোর্টাল</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+<style>body{{background:#f0f4f9;font-family:'Segoe UI',sans-serif;}}.card{{border-radius:18px;box-shadow:0 12px 35px rgba(0,0,0,0.07);border:none;}}.bkash-badge{{background-color:#e2136e;color:white;border-radius:12px;padding:12px 22px;font-weight:bold;display:inline-block;}}.header-banner{{background:linear-gradient(135deg,#0d6efd,#004ecc);color:white;padding:30px 20px;border-radius:18px 18px 0 0;text-align:center;}}</style>
+</head><body class="py-4"><div class="container" style="max-width: 530px;"><div class="card mb-4"><div class="header-banner"><h3 class="mb-1 fw-bold">{company}</h3><p class="mb-0 opacity-75 fs-6">বিকাশ দিয়ে অটোমেটিক ইনস্ট্যান্ট রিচার্জ</p></div>
+<div class="card-body p-4"><form method="GET" action="/" class="mb-3 position-relative" autocomplete="off"><label class="form-label fw-bold">গ্রাহকের নাম, ইউজার আইডি বা মোবাইল নম্বর:</label>
+<div class="input-group"><input type="text" id="searchInput" name="query" class="form-control form-control-lg" placeholder="যেমন: anisur বা 017..." value="{h(query or '')}" required><button class="btn btn-primary px-4 fw-bold" type="submit"><i class="fa-solid fa-magnifying-glass me-1"></i> সার্চ</button></div>
+<div id="searchResults" class="list-group shadow position-absolute w-100 mt-1 d-none" style="z-index:1050;max-height:280px;overflow-y:auto;"></div></form>{body_content}</div></div>
+<p class="text-center text-muted small">© {company} | হেল্পলাইন: {bkash_num}</p></div>
 <script>
-function copyBkash(n) {{
-    navigator.clipboard.writeText(n).then(() => {{
-        const btn = document.getElementById('copyBtn');
-        btn.innerHTML = '<i class="fa-solid fa-check text-success"></i>';
-        setTimeout(() => btn.innerHTML = '<i class="fa-regular fa-copy text-danger"></i>', 2000);
-    }});
-}}
-const si = document.getElementById('searchInput'), sr = document.getElementById('searchResults');
-if (si && sr) {{
-    si.addEventListener('input', async function() {{
-        const q = this.value.trim();
-        if (!q) {{ sr.classList.add('d-none'); return; }}
-        const res = await fetch('/api/search?q=' + encodeURIComponent(q));
-        const data = await res.json();
-        if (!data.length) {{ sr.innerHTML = '<div class="list-group-item text-muted small p-3">কোনো মিল পাওয়া যায়নি</div>'; sr.classList.remove('d-none'); return; }}
-        sr.innerHTML = data.map(item => `
-            <a href="/?user_id=${{item.id}}" class="list-group-item list-group-item-action d-flex justify-content-between align-items-center p-3">
-                <div><div class="fw-bold text-primary">${{item.name || item.username}}</div>
-                <small class="text-muted">আইডি: ${{item.username}} ${{item.phone ? '| ' + item.phone : ''}}</small></div>
-                <span class="badge bg-primary rounded-pill">সিলেক্ট ➔</span>
-            </a>`).join('');
-        sr.classList.remove('d-none');
-    }});
-    document.addEventListener('click', e => {{ if (!si.contains(e.target) && !sr.contains(e.target)) sr.classList.add('d-none'); }});
-}}
-</script>
-</body></html>"""
+function copyBkash(n){{navigator.clipboard.writeText(n).then(()=>{{const b=document.getElementById('copyBtn');b.innerHTML='<i class="fa-solid fa-check text-success"></i>';setTimeout(()=>b.innerHTML='<i class="fa-regular fa-copy text-danger"></i>',2000);}});}}
+const si=document.getElementById('searchInput'),sr=document.getElementById('searchResults');
+if(si&&sr){{si.addEventListener('input',async function(){{const q=this.value.trim();if(!q){{sr.classList.add('d-none');return;}}const res=await fetch('/api/search?q='+encodeURIComponent(q));const data=await res.json();if(!data.length){{sr.innerHTML='<div class="list-group-item text-muted small p-3">কোনো মিল পাওয়া যায়নি</div>';sr.classList.remove('d-none');return;}}sr.innerHTML=data.map(i=>`<a href="/?user_id=${{i.id}}" class="list-group-item list-group-item-action d-flex justify-content-between align-items-center p-3"><div><div class="fw-bold text-primary">${{i.name||i.username}}</div><small class="text-muted">আইডি: ${{i.username}} ${{i.phone?'| '+i.phone:''}}</small></div><span class="badge bg-primary rounded-pill">সিলেক্ট ➔</span></a>`).join('');sr.classList.remove('d-none');}});document.addEventListener('click',e=>{{if(!si.contains(e.target)&&!sr.contains(e.target))sr.classList.add('d-none');}});}}
+</script></body></html>"""
 
 
 @app.post("/api/pay", response_class=HTMLResponse)
@@ -452,20 +327,13 @@ async def process_payment(background_tasks: BackgroundTasks, username: str = For
     success, message = database.verify_and_apply_payment(username, trx_id)
     if success:
         background_tasks.add_task(unblock_in_mikrotik, username)
-        alert_class, icon, heading = "alert-success", "🎉", "পেমেন্ট সফল হয়েছে!"
+        ac, ic, hd = "alert-success", "🎉", "পেমেন্ট সফল হয়েছে!"
     else:
-        alert_class, icon, heading = "alert-danger", "⚠️", "পেমেন্ট সম্পন্ন হয়নি!"
-    return f"""<!DOCTYPE html>
-<html lang="bn"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>{company} - পেমেন্ট স্ট্যাটাস</title>
-<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"></head>
-<body class="bg-light py-5"><div class="container text-center" style="max-width: 500px;">
-<div class="card p-4 shadow-sm border-0"><div class="display-3 mb-3">{icon}</div>
-<h3 class="fw-bold mb-3">{heading}</h3><div class="alert {alert_class} text-start">{message}</div>
-<a href="/?query={h(username)}" class="btn btn-primary mt-2 fw-bold">ফিরে যান</a></div></div></body></html>"""
+        ac, ic, hd = "alert-danger", "⚠️", "পেমেন্ট সম্পন্ন হয়নি!"
+    return f"""<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>{company}</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"></head>
+<body class="bg-light py-5"><div class="container text-center" style="max-width:500px;"><div class="card p-4 shadow-sm border-0"><div class="display-3 mb-3">{ic}</div><h3 class="fw-bold mb-3">{hd}</h3><div class="alert {ac} text-start">{message}</div><a href="/?query={h(username)}" class="btn btn-primary mt-2 fw-bold">ফিরে যান</a></div></div></body></html>"""
 
 
-# --- ADMIN DASHBOARD ---
 @app.get("/admin", response_class=HTMLResponse)
 async def admin_dashboard(request: Request, background_tasks: BackgroundTasks, edit_id: Optional[int] = None, msg: Optional[str] = None):
     if not is_authenticated(request):
@@ -478,10 +346,7 @@ async def admin_dashboard(request: Request, background_tasks: BackgroundTasks, e
     bkash_num = h(database.get_setting("bkash_number", "01XXXXXXXXX"))
     edit_cust = database.get_customer_by_id(edit_id) if edit_id else None
 
-    actives = {}
-    profiles = ["default", "Profile-Line2", "Profile-Line3"]
-    mk_online = False
-    mk_error = ""
+    actives, profiles, mk_online, mk_error = {}, ["default", "Profile-Line2", "Profile-Line3"], False, ""
     try:
         api = get_mikrotik_conn()
         actives = api.get_active_pppoe()
@@ -491,7 +356,6 @@ async def admin_dashboard(request: Request, background_tasks: BackgroundTasks, e
     except Exception as e:
         mk_error = str(e)
 
-    # Expired ইউজার রিকানেক্ট হয়ে নতুন IP নিলে সাথে সাথে ব্লক লিস্টে পাঠানো
     if mk_online:
         expired_names = database.get_all_expired_usernames()
         to_block = [(u, actives[u]["address"]) for u in actives if u in expired_names]
@@ -506,16 +370,11 @@ async def admin_dashboard(request: Request, background_tasks: BackgroundTasks, e
         uname = c["username"]
         is_online = uname in actives
         act = actives.get(uname, {})
-        ip = act.get("address", "Offline")
-        uptime = act.get("uptime", "Offline")
+        ip, uptime = act.get("address", "Offline"), act.get("uptime", "Offline")
         mac = act.get("caller_id", c.get("mac_address") or "No MAC")
         usage_gb = act.get("usage_gb", 0.0) if is_online else 0.0
 
-        if is_online:
-            online_badge = f'<span class="badge bg-success-subtle text-success border border-success-subtle rounded-pill px-2">● Online</span> <span class="text-secondary small fw-bold">{h(uptime)}</span> <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-decoration-none badge bg-info-subtle text-primary border border-info-subtle" data-username="{h(uname)}" data-name="{h(c["name"] or uname)}" onclick="openLiveSpeedBtn(this)"><i class="fa-solid fa-chart-line"></i> Live</button>'
-        else:
-            online_badge = '<span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle rounded-pill px-2">○ Offline</span>'
-
+        online_badge = f'<span class="badge bg-success-subtle text-success border border-success-subtle rounded-pill px-2">● Online</span> <span class="text-secondary small fw-bold">{h(uptime)}</span> <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-decoration-none badge bg-info-subtle text-primary border border-info-subtle" data-username="{h(uname)}" data-name="{h(c["name"] or uname)}" onclick="openLiveSpeedBtn(this)"><i class="fa-solid fa-chart-line"></i> Live</button>' if is_online else '<span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle rounded-pill px-2">○ Offline</span>'
         time_lbl, time_cls, st_lbl, st_cls = calculate_expiry_label(c["expiry_date"], c["status"])
         dname = h(c["name"] or uname)
         try:
@@ -524,23 +383,16 @@ async def admin_dashboard(request: Request, background_tasks: BackgroundTasks, e
             exp_fmt = h(c["expiry_date"])
 
         bind_badge = '<span class="badge bg-primary-subtle text-primary border border-primary-subtle"><i class="fa-solid fa-lock"></i> Bound</span>' if c.get("mac_address") else '<span class="badge bg-light text-muted border"><i class="fa-solid fa-lock-open"></i> Unbound</span>'
-        olt_pon = int(c.get("olt_pon") or 0)
-        olt_onuid = int(c.get("olt_onuid") or 0)
-        onu_sn = c.get("onu_sn") or ""
+        olt_pon, olt_onuid, onu_sn = int(c.get("olt_pon") or 0), int(c.get("olt_onuid") or 0), (c.get("onu_sn") or "")
         onu_badge = f'<button type="button" class="badge bg-dark text-white border-0 mt-1" onclick="openOpticalModal({olt_pon}, {olt_onuid}, \'{h(onu_sn)}\')"><i class="fa-solid fa-signal text-info me-1"></i>PON{olt_pon}:{olt_onuid} ({h(onu_sn)})</button>' if olt_pon and olt_onuid else ""
 
         cust_rows_html += f"""
-        <div class="card mb-2 p-2 border customer-card" data-search="{h((uname + ' ' + (c['name'] or '') + ' ' + (c['phone'] or '') + ' ' + onu_sn).lower())}">
+        <div class="card mb-2 p-2 border customer-card" data-search="{h((uname + ' ' + (c['name'] or '') + ' ' + (c['phone'] or '') + ' ' + onu_sn + ' ' + mac).lower())}">
             <div class="row align-items-center g-2">
                 <div class="col-12 col-md-3">
                     <div class="d-flex align-items-center flex-wrap gap-1 mb-1">{online_badge}</div>
-                    <div class="small text-secondary mb-1">
-                        <i class="fa-solid fa-arrow-down-up-across-line text-primary"></i> <b>{usage_gb:.2f} GB</b> &nbsp;
-                        <i class="fa-solid fa-network-wired text-muted"></i> <b>{h(ip)}</b>
-                    </div>
-                    <div class="small text-muted">
-                        <i class="fa-solid fa-fingerprint"></i> <span class="text-secondary">{h(mac)}</span> {bind_badge}
-                    </div>
+                    <div class="small text-secondary mb-1"><i class="fa-solid fa-arrow-down-up-across-line text-primary"></i> <b>{usage_gb:.2f} GB</b> &nbsp; <i class="fa-solid fa-network-wired text-muted"></i> <b>{h(ip)}</b></div>
+                    <div class="small text-muted"><i class="fa-solid fa-fingerprint"></i> <span class="text-secondary">{h(mac)}</span> {bind_badge}</div>
                     {onu_badge}
                 </div>
                 <div class="col-12 col-md-3">
@@ -554,283 +406,126 @@ async def admin_dashboard(request: Request, background_tasks: BackgroundTasks, e
                     <div class="small text-secondary mt-1"><i class="fa-solid fa-cubes"></i> {h(c['package_name'])}</div>
                 </div>
                 <div class="col-6 col-md-3">
-                    <div class="d-flex align-items-center flex-wrap gap-1 mb-1">
-                        <span class="badge {st_cls} rounded-pill">{st_lbl}</span>
-                        <span class="badge {time_cls} rounded-pill">⌛ {time_lbl}</span>
-                    </div>
+                    <div class="d-flex align-items-center flex-wrap gap-1 mb-1"><span class="badge {st_cls} rounded-pill">{st_lbl}</span><span class="badge {time_cls} rounded-pill">⌛ {time_lbl}</span></div>
                     <div class="small text-dark fw-bold mb-1"><i class="fa-solid fa-bangladeshi-taka-sign text-primary"></i> {c['package_price']} TK</div>
                     <div class="small text-secondary"><i class="fa-regular fa-calendar-days text-danger"></i> {exp_fmt}</div>
                 </div>
                 <div class="col-auto ms-auto">
-                    <button type="button" class="btn btn-outline-primary rounded-circle p-0 d-flex align-items-center justify-content-center"
-                        style="width:42px;height:42px;"
-                        data-id="{c['id']}" data-name="{dname}" data-username="{h(uname)}"
-                        data-status="{h(c['status'])}" data-mac="{h(act.get('caller_id', '') if is_online else '')}"
-                        data-bound="{h(c.get('mac_address') or '')}" data-pon="{olt_pon}" data-onuid="{olt_onuid}" data-sn="{h(onu_sn)}"
-                        onclick="openActionDrawer(this)">
+                    <button type="button" class="btn btn-outline-primary rounded-circle p-0 d-flex align-items-center justify-content-center" style="width:42px;height:42px;"
+                        data-id="{c['id']}" data-name="{dname}" data-username="{h(uname)}" data-status="{h(c['status'])}"
+                        data-mac="{h(act.get('caller_id', '') if is_online else '')}" data-bound="{h(c.get('mac_address') or '')}"
+                        data-pon="{olt_pon}" data-onuid="{olt_onuid}" data-sn="{h(onu_sn)}" onclick="openActionDrawer(this)">
                         <i class="fa-solid fa-sliders fs-5"></i>
                     </button>
                 </div>
             </div>
         </div>"""
 
-    pay_rows = ""
-    for p in payments:
-        ub = '<span class="badge bg-secondary">Used</span>' if p["status"] == "used" else '<span class="badge bg-success">Unused</span>'
-        pay_rows += f"<tr><td><b>{h(p['trx_id'])}</b></td><td><b class='text-success'>{p['amount']} ৳</b></td><td><small>{h(p['sender_phone'])}</small></td><td><small>{h(p['received_at'])}</small></td><td>{ub}</td><td><b>{h(p['used_by'] or '-')}</b></td></tr>"
+    pay_rows = "".join(
+        f"<tr><td><b>{h(p['trx_id'])}</b></td><td><b class='text-success'>{p['amount']} ৳</b></td><td><small>{h(p['sender_phone'])}</small></td><td><small>{h(p['received_at'])}</small></td><td>{'<span class=\"badge bg-secondary\">Used</span>' if p['status']=='used' else '<span class=\"badge bg-success\">Unused</span>'}</td><td><b>{h(p['used_by'] or '-')}</b></td></tr>"
+        for p in payments
+    )
 
     def profile_options(selected):
-        opts = list(profiles)
-        if selected and selected not in opts:
-            opts.append(selected)
+        opts = list(profiles) + ([selected] if selected and selected not in profiles else [])
         return "".join(f'<option value="{h(p)}" {"selected" if p == selected else ""}>{h(p)}</option>' for p in opts)
 
     edit_form_html = ""
     if edit_cust:
         edit_form_html = f"""
-        <div class="card shadow border-primary mb-4">
-            <div class="card-header bg-primary text-white fw-bold d-flex justify-content-between align-items-center">
-                <span><i class="fa-solid fa-pen-to-square me-2"></i>গ্রাহক এডিট করুন: {h(edit_cust['username'])}</span>
-                <a href="/admin" class="btn btn-sm btn-light">বাতিল</a>
-            </div>
-            <div class="card-body">
-                <form method="POST" action="/admin/update-customer">
-                    <input type="hidden" name="cust_id" value="{edit_cust['id']}">
-                    <div class="row g-3">
-                        <div class="col-md-2"><label class="form-label fw-bold">PPPoE আইডি</label><input type="text" class="form-control" value="{h(edit_cust['username'])}" disabled></div>
-                        <div class="col-md-3"><label class="form-label fw-bold">গ্রাহকের নাম</label><input type="text" name="name" class="form-control" value="{h(edit_cust['name'])}"></div>
-                        <div class="col-md-2"><label class="form-label fw-bold">মোবাইল</label><input type="text" name="phone" class="form-control" value="{h(edit_cust['phone'])}"></div>
-                        <div class="col-md-2"><label class="form-label fw-bold">PPPoE পাসওয়ার্ড</label><input type="text" name="password" class="form-control" value="{h(edit_cust['password'])}"></div>
-                        <div class="col-md-3"><label class="form-label fw-bold">MikroTik প্রোফাইল</label><select name="profile" class="form-select">{profile_options(edit_cust['profile'])}</select></div>
-                        <div class="col-md-2"><label class="form-label fw-bold">প্যাকেজের নাম</label><input type="text" name="package_name" class="form-control" value="{h(edit_cust['package_name'])}"></div>
-                        <div class="col-md-2"><label class="form-label fw-bold">মাসিক বিল (৳)</label><input type="number" name="package_price" class="form-control" value="{edit_cust['package_price']}"></div>
-                        <div class="col-md-3"><label class="form-label fw-bold">মেয়াদ</label><input type="text" name="expiry_date" class="form-control" value="{h(edit_cust['expiry_date'])}"></div>
-                        <div class="col-md-2"><label class="form-label fw-bold">স্ট্যাটাস</label>
-                            <select name="status" class="form-select">
-                                <option value="active" {"selected" if edit_cust['status']=='active' else ''}>Active</option>
-                                <option value="expired" {"selected" if edit_cust['status']=='expired' else ''}>Expired</option>
-                            </select>
-                        </div>
-                    </div>
-                    <div class="mt-3"><button type="submit" class="btn btn-success fw-bold px-4">আপডেট করুন</button> <a href="/admin" class="btn btn-secondary">বাতিল</a></div>
-                </form>
-            </div>
-        </div>"""
+        <div class="card shadow border-primary mb-4"><div class="card-header bg-primary text-white fw-bold d-flex justify-content-between align-items-center"><span>গ্রাহক এডিট করুন: {h(edit_cust['username'])}</span><a href="/admin" class="btn btn-sm btn-light">বাতিল</a></div>
+        <div class="card-body"><form method="POST" action="/admin/update-customer"><input type="hidden" name="cust_id" value="{edit_cust['id']}"><div class="row g-3">
+            <div class="col-md-2"><label class="form-label fw-bold">PPPoE আইডি</label><input type="text" class="form-control" value="{h(edit_cust['username'])}" disabled></div>
+            <div class="col-md-3"><label class="form-label fw-bold">গ্রাহকের নাম</label><input type="text" name="name" class="form-control" value="{h(edit_cust['name'])}"></div>
+            <div class="col-md-2"><label class="form-label fw-bold">মোবাইল</label><input type="text" name="phone" class="form-control" value="{h(edit_cust['phone'])}"></div>
+            <div class="col-md-2"><label class="form-label fw-bold">PPPoE পাসওয়ার্ড</label><input type="text" name="password" class="form-control" value="{h(edit_cust['password'])}"></div>
+            <div class="col-md-3"><label class="form-label fw-bold">MikroTik প্রোফাইল</label><select name="profile" class="form-select">{profile_options(edit_cust['profile'])}</select></div>
+            <div class="col-md-2"><label class="form-label fw-bold">প্যাকেজের নাম</label><input type="text" name="package_name" class="form-control" value="{h(edit_cust['package_name'])}"></div>
+            <div class="col-md-2"><label class="form-label fw-bold">মাসিক বিল (৳)</label><input type="number" name="package_price" class="form-control" value="{edit_cust['package_price']}"></div>
+            <div class="col-md-3"><label class="form-label fw-bold">মেয়াদ</label><input type="text" name="expiry_date" class="form-control" value="{h(edit_cust['expiry_date'])}"></div>
+            <div class="col-md-2"><label class="form-label fw-bold">স্ট্যাটাস</label><select name="status" class="form-select"><option value="active" {"selected" if edit_cust['status']=='active' else ''}>Active</option><option value="expired" {"selected" if edit_cust['status']=='expired' else ''}>Expired</option></select></div>
+        </div><div class="mt-3"><button type="submit" class="btn btn-success fw-bold px-4">আপডেট করুন</button> <a href="/admin" class="btn btn-secondary">বাতিল</a></div></form></div></div>"""
 
     msg_alert = f'<div class="alert alert-info alert-dismissible fade show">{h(msg)}<button type="button" class="btn-close" data-bs-dismiss="alert"></button></div>' if msg else ""
 
-    return f"""<!DOCTYPE html>
-<html lang="bn">
-<head>
-    <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{company} - Admin Dashboard</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <style>
-        body {{ background: #eef2f6; font-family: 'Segoe UI', sans-serif; }}
-        .card {{ border-radius: 12px; }}
-        .stat-card {{ border-radius: 12px; padding: 18px; color: white; }}
-        .action-btn {{ border-radius: 10px; padding: 10px 12px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; gap: 6px; font-size: 14px; text-decoration: none; }}
-    </style>
-</head>
-<body class="p-2 p-md-4">
-<div class="container-fluid">
-    {admin_navbar("dashboard")}
-    {msg_alert}
-
+    return f"""<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{company} - Admin Dashboard</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+<style>body{{background:#eef2f6;font-family:'Segoe UI',sans-serif;}}.card{{border-radius:12px;}}.stat-card{{border-radius:12px;padding:18px;color:white;}}.action-btn{{border-radius:10px;padding:10px 12px;font-weight:600;display:inline-flex;align-items:center;justify-content:center;gap:6px;font-size:14px;text-decoration:none;}}</style>
+</head><body class="p-2 p-md-4"><div class="container-fluid">
+    {admin_navbar("dashboard")} {msg_alert}
     <div class="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-2">
-        <div class="d-flex flex-wrap align-items-center gap-2">
-            {mk_badge} {db_badge}
-            <span class="badge bg-dark"><i class="fa-solid fa-mobile-screen me-1 text-danger"></i> বিকাশ: {bkash_num}</span>
-        </div>
+        <div class="d-flex flex-wrap align-items-center gap-2">{mk_badge} {db_badge} <span class="badge bg-dark"><i class="fa-solid fa-mobile-screen me-1 text-danger"></i> বিকাশ: {bkash_num}</span></div>
         <div class="d-flex gap-2">
-            <a href="/admin/sync-mikrotik" class="btn btn-outline-primary fw-bold btn-sm" onclick="return confirm('MikroTik থেকে সব PPPoE ইউজার Import করবেন?');">
-                <i class="fa-solid fa-rotate me-1"></i> MikroTik থেকে ইউজার সিঙ্ক
-            </a>
-            <button class="btn btn-success fw-bold btn-sm" data-bs-toggle="modal" data-bs-target="#newCustomerModal">
-                <i class="fa-solid fa-user-plus me-1"></i> নতুন গ্রাহক
-            </button>
+            <a href="/admin/sync-mikrotik" class="btn btn-outline-primary fw-bold btn-sm" onclick="return confirm('MikroTik থেকে সব PPPoE ইউজার Import করবেন?');"><i class="fa-solid fa-rotate me-1"></i> MikroTik থেকে ইউজার সিঙ্ক</a>
+            <button class="btn btn-success fw-bold btn-sm" data-bs-toggle="modal" data-bs-target="#newCustomerModal"><i class="fa-solid fa-user-plus me-1"></i> নতুন গ্রাহক</button>
         </div>
     </div>
-
     <div class="row g-3 mb-4">
         <div class="col-6 col-md-3"><div class="stat-card bg-primary shadow-sm"><small class="fw-bold opacity-75">মোট গ্রাহক</small><h2 class="fw-bold mb-0">{stats['total']}</h2></div></div>
         <div class="col-6 col-md-3"><div class="stat-card bg-success shadow-sm"><small class="fw-bold opacity-75">সচল গ্রাহক</small><h2 class="fw-bold mb-0">{stats['active']}</h2></div></div>
         <div class="col-6 col-md-3"><div class="stat-card bg-danger shadow-sm"><small class="fw-bold opacity-75">মেয়াদোত্তীর্ণ</small><h2 class="fw-bold mb-0">{stats['expired']}</h2></div></div>
         <div class="col-6 col-md-3"><div class="stat-card bg-dark shadow-sm"><small class="fw-bold opacity-75">মোট কালেকশন</small><h2 class="fw-bold mb-0">{stats['total_revenue']} ৳</h2></div></div>
     </div>
-
     {edit_form_html}
-
-    <div class="card p-3 mb-3 bg-white border-0 shadow-sm">
-        <div class="row align-items-center g-2">
-            <div class="col-md-6">
-                <input type="text" id="custSearchInput" class="form-control" placeholder="গ্রাহকের নাম, ইউজার আইডি, মোবাইল বা ONU SN দিয়ে খুঁজুন..." onkeyup="filterCustomerCards()">
-            </div>
-            <div class="col-md-6 text-md-end text-muted small">মোট: <b>{len(customers)} জন</b> | অনলাইন: <b>{len(actives)} জন</b></div>
-        </div>
-    </div>
-
-    <div id="customerCardsContainer">{cust_rows_html or '<div class="alert alert-light text-center">কোনো গ্রাহক নেই। "MikroTik থেকে ইউজার সিঙ্ক" অথবা "নতুন গ্রাহক" বাটনে ক্লিক করুন।</div>'}</div>
-
-    <div class="card shadow-sm mt-4">
-        <div class="card-header bg-white py-3"><h5 class="fw-bold mb-0"><i class="fa-solid fa-receipt me-2 text-danger"></i>সাম্প্রতিক বিকাশ পেমেন্ট হিস্ট্রি</h5></div>
-        <div class="card-body p-0 table-responsive">
-            <table class="table table-sm table-hover align-middle mb-0">
-                <thead class="table-light"><tr><th>TrxID</th><th>টাকা</th><th>নম্বর</th><th>সময়</th><th>স্ট্যাটাস</th><th>ইউজার</th></tr></thead>
-                <tbody>{pay_rows}</tbody>
-            </table>
-        </div>
-    </div>
+    <div class="card p-3 mb-3 bg-white border-0 shadow-sm"><div class="row align-items-center g-2"><div class="col-md-6"><input type="text" id="custSearchInput" class="form-control" placeholder="গ্রাহকের নাম, ইউজার আইডি, মোবাইল, MAC বা ONU SN দিয়ে খুঁজুন..." onkeyup="filterCustomerCards()"></div><div class="col-md-6 text-md-end text-muted small">মোট: <b>{len(customers)} জন</b> | অনলাইন: <b>{len(actives)} জন</b></div></div></div>
+    <div id="customerCardsContainer">{cust_rows_html or '<div class="alert alert-light text-center">কোনো গ্রাহক নেই।</div>'}</div>
+    <div class="card shadow-sm mt-4"><div class="card-header bg-white py-3"><h5 class="fw-bold mb-0"><i class="fa-solid fa-receipt me-2 text-danger"></i>সাম্প্রতিক বিকাশ পেমেন্ট হিস্ট্রি</h5></div><div class="card-body p-0 table-responsive"><table class="table table-sm table-hover align-middle mb-0"><thead class="table-light"><tr><th>TrxID</th><th>টাকা</th><th>নম্বর</th><th>সময়</th><th>স্ট্যাটাস</th><th>ইউজার</th></tr></thead><tbody>{pay_rows}</tbody></table></div></div>
 </div>
 
-<!-- Action Drawer Modal -->
-<div class="modal fade" id="actionModal" tabindex="-1"><div class="modal-dialog modal-dialog-centered"><div class="modal-content border-0 shadow">
-    <div class="modal-header border-bottom"><h5 class="modal-title fw-bold" id="actionModalTitle">Actions</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
-    <div class="modal-body p-4"><div class="row g-2" id="actionButtonsGrid"></div></div>
-</div></div></div>
-
-<!-- Live Speed Modal -->
-<div class="modal fade" id="speedModal" tabindex="-1"><div class="modal-dialog modal-dialog-centered"><div class="modal-content border-0 shadow text-center">
-    <div class="modal-header bg-primary text-white"><h5 class="modal-title fw-bold"><i class="fa-solid fa-chart-line me-2"></i>Live Traffic</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div>
-    <div class="modal-body p-4">
-        <h6 class="text-muted mb-3" id="speedUserLabel">Loading...</h6>
-        <div class="row g-3">
-            <div class="col-6"><div class="p-3 bg-light rounded-3 border border-success"><div class="text-success small fw-bold">ডাউনলোড (Download)</div><h2 class="fw-bold text-success my-2" id="rxSpeed">0.00</h2><small>Mbps</small></div></div>
-            <div class="col-6"><div class="p-3 bg-light rounded-3 border border-primary"><div class="text-primary small fw-bold">আপলোড (Upload)</div><h2 class="fw-bold text-primary my-2" id="txSpeed">0.00</h2><small>Mbps</small></div></div>
-        </div>
-        <div class="mt-3"><span class="badge bg-success" id="speedOnlineStatus">● Monitoring</span></div>
-    </div>
-</div></div></div>
-
-<!-- OLT Optical Modal -->
-<div class="modal fade" id="opticalModal" tabindex="-1"><div class="modal-dialog modal-dialog-centered"><div class="modal-content border-0 shadow">
-    <div class="modal-header bg-dark text-white"><h5 class="modal-title fw-bold"><i class="fa-solid fa-signal text-info me-2"></i>ONU Optical Signal</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div>
-    <div class="modal-body" id="opticalModalBody">লোড হচ্ছে...</div>
-</div></div></div>
-
-<!-- New Customer Modal -->
-<div class="modal fade" id="newCustomerModal" tabindex="-1"><div class="modal-dialog modal-lg"><div class="modal-content">
-    <div class="modal-header bg-primary text-white"><h5 class="modal-title fw-bold"><i class="fa-solid fa-user-plus me-2"></i>নতুন গ্রাহক যুক্ত করুন</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div>
-    <form method="POST" action="/admin/create-customer"><div class="modal-body"><div class="row g-3">
-        <div class="col-md-6"><label class="form-label fw-bold">PPPoE ইউজার আইডি *</label><input type="text" name="username" class="form-control" required></div>
-        <div class="col-md-6"><label class="form-label fw-bold">PPPoE পাসওয়ার্ড *</label><input type="text" name="password" class="form-control" value="123456" required></div>
-        <div class="col-md-6"><label class="form-label fw-bold">গ্রাহকের নাম</label><input type="text" name="name" class="form-control"></div>
-        <div class="col-md-6"><label class="form-label fw-bold">মোবাইল নম্বর</label><input type="text" name="phone" class="form-control"></div>
-        <div class="col-md-4"><label class="form-label fw-bold">প্যাকেজ নাম</label><input type="text" name="package_name" class="form-control" value="25 Mbps"></div>
-        <div class="col-md-4"><label class="form-label fw-bold">মাসিক বিল (৳)</label><input type="number" name="package_price" class="form-control" value="525"></div>
-        <div class="col-md-4"><label class="form-label fw-bold">প্রোফাইল</label><select name="profile" class="form-select">{profile_options('default')}</select></div>
-        <div class="col-md-6"><label class="form-label fw-bold">প্রাথমিক মেয়াদ (দিন)</label><input type="number" name="days_valid" class="form-control" value="30"></div>
-    </div></div>
-    <div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">বন্ধ</button><button type="submit" class="btn btn-primary fw-bold">সংরক্ষণ ও সিঙ্ক করুন</button></div>
-    </form>
-</div></div></div>
+<div class="modal fade" id="actionModal" tabindex="-1"><div class="modal-dialog modal-dialog-centered"><div class="modal-content border-0 shadow"><div class="modal-header border-bottom"><h5 class="modal-title fw-bold" id="actionModalTitle">Actions</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body p-4"><div class="row g-2" id="actionButtonsGrid"></div></div></div></div></div>
+<div class="modal fade" id="speedModal" tabindex="-1"><div class="modal-dialog modal-dialog-centered"><div class="modal-content border-0 shadow text-center"><div class="modal-header bg-primary text-white"><h5 class="modal-title fw-bold"><i class="fa-solid fa-chart-line me-2"></i>Live Traffic</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div><div class="modal-body p-4"><h6 class="text-muted mb-3" id="speedUserLabel">Loading...</h6><div class="row g-3"><div class="col-6"><div class="p-3 bg-light rounded-3 border border-success"><div class="text-success small fw-bold">ডাউনলোড</div><h2 class="fw-bold text-success my-2" id="rxSpeed">0.00</h2><small>Mbps</small></div></div><div class="col-6"><div class="p-3 bg-light rounded-3 border border-primary"><div class="text-primary small fw-bold">আপলোড</div><h2 class="fw-bold text-primary my-2" id="txSpeed">0.00</h2><small>Mbps</small></div></div></div><div class="mt-3"><span class="badge bg-success" id="speedOnlineStatus">● Monitoring</span></div></div></div></div></div>
+<div class="modal fade" id="opticalModal" tabindex="-1"><div class="modal-dialog modal-dialog-centered"><div class="modal-content border-0 shadow"><div class="modal-header bg-dark text-white"><h5 class="modal-title fw-bold"><i class="fa-solid fa-signal text-info me-2"></i>ONU Optical Signal</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div><div class="modal-body" id="opticalModalBody">লোড হচ্ছে...</div></div></div></div>
+<div class="modal fade" id="newCustomerModal" tabindex="-1"><div class="modal-dialog modal-lg"><div class="modal-content"><div class="modal-header bg-primary text-white"><h5 class="modal-title fw-bold">নতুন গ্রাহক যুক্ত করুন</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div><form method="POST" action="/admin/create-customer"><div class="modal-body"><div class="row g-3"><div class="col-md-6"><label class="form-label fw-bold">PPPoE ইউজার আইডি *</label><input type="text" name="username" class="form-control" required></div><div class="col-md-6"><label class="form-label fw-bold">PPPoE পাসওয়ার্ড *</label><input type="text" name="password" class="form-control" value="123456" required></div><div class="col-md-6"><label class="form-label fw-bold">গ্রাহকের নাম</label><input type="text" name="name" class="form-control"></div><div class="col-md-6"><label class="form-label fw-bold">মোবাইল নম্বর</label><input type="text" name="phone" class="form-control"></div><div class="col-md-4"><label class="form-label fw-bold">প্যাকেজ নাম</label><input type="text" name="package_name" class="form-control" value="25 Mbps"></div><div class="col-md-4"><label class="form-label fw-bold">মাসিক বিল (৳)</label><input type="number" name="package_price" class="form-control" value="525"></div><div class="col-md-4"><label class="form-label fw-bold">প্রোফাইল</label><select name="profile" class="form-select">{profile_options('default')}</select></div><div class="col-md-6"><label class="form-label fw-bold">প্রাথমিক মেয়াদ (দিন)</label><input type="number" name="days_valid" class="form-control" value="30"></div></div></div><div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">বন্ধ</button><button type="submit" class="btn btn-primary fw-bold">সংরক্ষণ ও সিঙ্ক</button></div></form></div></div></div>
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 <script>
-function filterCustomerCards() {{
-    const q = document.getElementById("custSearchInput").value.toLowerCase();
-    document.querySelectorAll(".customer-card").forEach(c => c.style.display = c.getAttribute("data-search").includes(q) ? "" : "none");
-}}
-
-let actionModalInstance = null;
-function openActionDrawer(btn) {{
-    const d = btn.dataset;
-    document.getElementById("actionModalTitle").innerText = "Customer: #" + (parseInt(d.id) + 40500) + " (" + d.name + ")";
-    const suspendLabel = d.status === "active" ? '<i class="fa-solid fa-circle-pause"></i> Suspend' : '<i class="fa-solid fa-circle-play"></i> Activate';
-    const macBtn = d.bound
-        ? `<a href="/admin/bind-mac/${{d.id}}?unbind=1" class="btn btn-outline-dark w-100 action-btn"><i class="fa-solid fa-lock-open"></i> Unbind MAC</a>`
-        : (d.mac ? `<a href="/admin/bind-mac/${{d.id}}?mac=${{encodeURIComponent(d.mac)}}" class="btn btn-outline-dark w-100 action-btn"><i class="fa-solid fa-lock"></i> Bind MAC</a>` : `<button disabled class="btn btn-outline-secondary w-100 action-btn"><i class="fa-solid fa-lock"></i> Offline (No MAC)</button>`);
-    const onuBtn = (parseInt(d.pon) > 0 && parseInt(d.onuid) > 0)
-        ? `<div class="col-6"><button onclick="actionModalInstance.hide(); openOpticalModal(${{d.pon}}, ${{d.onuid}}, '${{d.sn}}')" class="btn btn-outline-dark w-100 action-btn"><i class="fa-solid fa-signal text-info"></i> ONU Power</button></div>`
-        : '';
-
-    document.getElementById("actionButtonsGrid").innerHTML = `
+function filterCustomerCards(){{const q=document.getElementById("custSearchInput").value.toLowerCase();document.querySelectorAll(".customer-card").forEach(c=>c.style.display=c.getAttribute("data-search").includes(q)?"":"none");}}
+let actionModalInstance=null;
+function openActionDrawer(btn){{
+    const d=btn.dataset;
+    document.getElementById("actionModalTitle").innerText="Customer: #"+(parseInt(d.id)+40500)+" ("+d.name+")";
+    const suspendLabel=d.status==="active"?'<i class="fa-solid fa-circle-pause"></i> Suspend':'<i class="fa-solid fa-circle-play"></i> Activate';
+    const macBtn=d.bound?`<a href="/admin/bind-mac/${{d.id}}?unbind=1" class="btn btn-outline-dark w-100 action-btn"><i class="fa-solid fa-lock-open"></i> Unbind MAC</a>`:(d.mac?`<a href="/admin/bind-mac/${{d.id}}?mac=${{encodeURIComponent(d.mac)}}" class="btn btn-outline-dark w-100 action-btn"><i class="fa-solid fa-lock"></i> Bind MAC</a>`:`<button disabled class="btn btn-outline-secondary w-100 action-btn"><i class="fa-solid fa-lock"></i> Offline</button>`);
+    const onuBtn=(parseInt(d.pon)>0&&parseInt(d.onuid)>0)?`<div class="col-6"><button onclick="actionModalInstance.hide();openOpticalModal(${{d.pon}},${{d.onuid}},'${{d.sn}}')" class="btn btn-outline-dark w-100 action-btn"><i class="fa-solid fa-signal text-info"></i> ONU Power</button></div>`:'';
+    document.getElementById("actionButtonsGrid").innerHTML=`
         <div class="col-6"><a href="/admin?edit_id=${{d.id}}" class="btn btn-outline-primary w-100 action-btn"><i class="fa-solid fa-pen-to-square"></i> Edit</a></div>
         <div class="col-6"><a href="/admin/toggle-suspend/${{d.id}}" class="btn btn-outline-warning w-100 action-btn">${{suspendLabel}}</a></div>
         <div class="col-6"><a href="/admin/quick-extend/${{d.id}}" class="btn btn-outline-success w-100 action-btn"><i class="fa-solid fa-calendar-plus"></i> Recharge (+30d)</a></div>
         <div class="col-6"><a href="/admin/kick/${{encodeURIComponent(d.username)}}" class="btn btn-outline-info w-100 action-btn"><i class="fa-solid fa-plug-circle-xmark"></i> Disconnect</a></div>
-        <div class="col-6"><button onclick="actionModalInstance.hide(); openLiveSpeed('${{d.username}}', '${{d.name}}')" class="btn btn-outline-primary w-100 action-btn"><i class="fa-solid fa-chart-line"></i> Live Speed</button></div>
-        <div class="col-6">${{macBtn}}</div>
-        ${{onuBtn}}
+        <div class="col-6"><button onclick="actionModalInstance.hide();openLiveSpeed('${{d.username}}','${{d.name}}')" class="btn btn-outline-primary w-100 action-btn"><i class="fa-solid fa-chart-line"></i> Live Speed</button></div>
+        <div class="col-6">${{macBtn}}</div>${{onuBtn}}
         <div class="col-6"><a href="/?query=${{encodeURIComponent(d.username)}}" target="_blank" class="btn btn-outline-secondary w-100 action-btn"><i class="fa-solid fa-arrow-up-right-from-square"></i> Portal</a></div>
         <div class="col-12 mt-2"><a href="/admin/delete/${{d.id}}" onclick="return confirm('আপনি কি নিশ্চিত এই গ্রাহককে মুছে ফেলতে চান?');" class="btn btn-outline-danger w-100 action-btn"><i class="fa-solid fa-trash"></i> Delete Account</a></div>`;
-    actionModalInstance = new bootstrap.Modal(document.getElementById("actionModal"));
-    actionModalInstance.show();
+    actionModalInstance=new bootstrap.Modal(document.getElementById("actionModal"));actionModalInstance.show();
 }}
-
-function openLiveSpeedBtn(btn) {{ openLiveSpeed(btn.dataset.username, btn.dataset.name); }}
-
-let speedInterval = null;
-function openLiveSpeed(username, name) {{
-    document.getElementById("speedUserLabel").innerText = name + " (" + username + ")";
-    new bootstrap.Modal(document.getElementById("speedModal")).show();
-    fetchSpeed(username);
-    if (speedInterval) clearInterval(speedInterval);
-    speedInterval = setInterval(() => fetchSpeed(username), 1500);
-}}
-async function fetchSpeed(username) {{
-    try {{
-        const res = await fetch('/api/live-speed/' + encodeURIComponent(username));
-        const data = await res.json();
-        document.getElementById("rxSpeed").innerText = (data.rx_mbps || 0).toFixed(2);
-        document.getElementById("txSpeed").innerText = (data.tx_mbps || 0).toFixed(2);
-        const sb = document.getElementById("speedOnlineStatus");
-        sb.className = data.online ? "badge bg-success" : "badge bg-secondary";
-        sb.innerText = data.online ? "● Connected & Active" : "○ Idle or Offline";
-    }} catch (e) {{}}
-}}
-document.getElementById("speedModal").addEventListener('hidden.bs.modal', () => {{ if (speedInterval) clearInterval(speedInterval); }});
-
-async function openOpticalModal(pon, onuid, sn) {{
-    const body = document.getElementById("opticalModalBody");
-    body.innerHTML = '<div class="text-center py-4"><div class="spinner-border text-primary"></div><div class="mt-2">OLT থেকে সিগন্যাল তথ্য আনা হচ্ছে...</div></div>';
+function openLiveSpeedBtn(btn){{openLiveSpeed(btn.dataset.username,btn.dataset.name);}}
+let speedInterval=null;
+function openLiveSpeed(u,n){{document.getElementById("speedUserLabel").innerText=n+" ("+u+")";new bootstrap.Modal(document.getElementById("speedModal")).show();fetchSpeed(u);if(speedInterval)clearInterval(speedInterval);speedInterval=setInterval(()=>fetchSpeed(u),1500);}}
+async function fetchSpeed(u){{try{{const r=await fetch('/api/live-speed/'+encodeURIComponent(u));const d=await r.json();document.getElementById("rxSpeed").innerText=(d.rx_mbps||0).toFixed(2);document.getElementById("txSpeed").innerText=(d.tx_mbps||0).toFixed(2);const sb=document.getElementById("speedOnlineStatus");sb.className=d.online?"badge bg-success":"badge bg-secondary";sb.innerText=d.online?"● Connected & Active":"○ Idle or Offline";}}catch(e){{}}}}
+document.getElementById("speedModal").addEventListener('hidden.bs.modal',()=>{{if(speedInterval)clearInterval(speedInterval);}});
+async function openOpticalModal(pon,onuid,sn){{
+    const b=document.getElementById("opticalModalBody");b.innerHTML='<div class="text-center py-4"><div class="spinner-border text-primary"></div><div class="mt-2">লোড হচ্ছে...</div></div>';
     new bootstrap.Modal(document.getElementById("opticalModal")).show();
-    try {{
-        const res = await fetch(`/api/olt/optical?pon_id=${{pon}}&onu_id=${{onuid}}`);
-        const d = await res.json();
-        if (d.error) {{ body.innerHTML = `<div class="alert alert-danger">${{d.error}}</div>`; return; }}
-        let sigBadge = '<span class="badge bg-secondary">Unknown</span>';
-        if (d.rx_dbm !== null && d.rx_dbm !== undefined) {{
-            if (d.rx_dbm >= -25) sigBadge = '<span class="badge bg-success">ভালো সিগন্যাল (Good)</span>';
-            else if (d.rx_dbm >= -27.5) sigBadge = '<span class="badge bg-warning text-dark">দুর্বল হচ্ছে (Warning)</span>';
-            else sigBadge = '<span class="badge bg-danger">খুব দুর্বল / লস ঝুঁকি (Critical)</span>';
-        }}
-        body.innerHTML = `
-            <div class="mb-2"><b>ONU:</b> GPON0/${{pon}}:${{onuid}} ${{sn ? '(' + sn + ')' : ''}} ${{sigBadge}}</div>
-            <table class="table table-bordered table-sm mb-0">
-                <tr><th>Rx Optical Power</th><td class="fw-bold text-primary">${{d.rx_power}}</td></tr>
-                <tr><th>Tx Optical Power</th><td>${{d.tx_power}}</td></tr>
-                <tr><th>Distance</th><td>${{d.distance}}</td></tr>
-                <tr><th>Temperature</th><td>${{d.temperature}}</td></tr>
-                <tr><th>Voltage / Bias</th><td>${{d.voltage}} / ${{d.bias_current}}</td></tr>
-            </table>`;
-    }} catch (e) {{ body.innerHTML = `<div class="alert alert-danger">ত্রুটি: ${{e}}</div>`; }}
+    try{{const r=await fetch(`/api/olt/optical?pon_id=${{pon}}&onu_id=${{onuid}}`);const d=await r.json();if(d.error){{b.innerHTML=`<div class="alert alert-danger">${{d.error}}</div>`;return;}}
+    let sb='<span class="badge bg-secondary">Unknown</span>';if(d.rx_dbm!==null&&d.rx_dbm!==undefined){{sb=d.rx_dbm>=-25?'<span class="badge bg-success">ভালো (Good)</span>':(d.rx_dbm>=-27.5?'<span class="badge bg-warning text-dark">দুর্বল হচ্ছে</span>':'<span class="badge bg-danger">খুব দুর্বল / Critical</span>');}}
+    b.innerHTML=`<div class="mb-2"><b>ONU:</b> GPON0/${{pon}}:${{onuid}} ${{sn?'('+sn+')':''}} ${{sb}}</div><table class="table table-bordered table-sm mb-0"><tr><th>Rx Power</th><td class="fw-bold text-primary">${{d.rx_power}}</td></tr><tr><th>Tx Power</th><td>${{d.tx_power}}</td></tr><tr><th>Distance</th><td>${{d.distance}}</td></tr><tr><th>Temperature</th><td>${{d.temperature}}</td></tr><tr><th>Voltage / Bias</th><td>${{d.voltage}} / ${{d.bias_current}}</td></tr></table>`;}}catch(e){{b.innerHTML=`<div class="alert alert-danger">${{e}}</div>`;}}
 }}
-</script>
-</body></html>"""
+</script></body></html>"""
 
 
-# --- ADMIN CUSTOMER CRUD ---
 @app.post("/admin/create-customer")
-async def create_customer_action(request: Request, background_tasks: BackgroundTasks, username: str = Form(...), password: str = Form(...),
-                                 name: str = Form(""), phone: str = Form(""), package_name: str = Form("25 Mbps"),
-                                 package_price: int = Form(525), profile: str = Form("default"), days_valid: int = Form(30)):
-    if not is_authenticated(request):
-        return RedirectResponse(url="/login")
-    success, _ = database.create_customer(username, password, name, phone, package_name, package_price, profile, days_valid)
-    if success:
-        background_tasks.add_task(sync_secret_to_mikrotik, username, password, profile)
+async def create_customer_action(request: Request, background_tasks: BackgroundTasks, username: str = Form(...), password: str = Form(...), name: str = Form(""), phone: str = Form(""), package_name: str = Form("25 Mbps"), package_price: int = Form(525), profile: str = Form("default"), days_valid: int = Form(30)):
+    if not is_authenticated(request): return RedirectResponse(url="/login")
+    ok, _ = database.create_customer(username, password, name, phone, package_name, package_price, profile, days_valid)
+    if ok: background_tasks.add_task(sync_secret_to_mikrotik, username, password, profile)
     return RedirectResponse(url="/admin", status_code=303)
 
 
 @app.post("/admin/update-customer")
-async def update_customer_action(request: Request, background_tasks: BackgroundTasks, cust_id: int = Form(...), name: str = Form(""),
-                                 phone: str = Form(""), password: str = Form(...), package_name: str = Form("25 Mbps"),
-                                 package_price: int = Form(525), profile: str = Form("default"),
-                                 expiry_date: str = Form(...), status: str = Form("active")):
-    if not is_authenticated(request):
-        return RedirectResponse(url="/login")
+async def update_customer_action(request: Request, background_tasks: BackgroundTasks, cust_id: int = Form(...), name: str = Form(""), phone: str = Form(""), password: str = Form(...), package_name: str = Form("25 Mbps"), package_price: int = Form(525), profile: str = Form("default"), expiry_date: str = Form(...), status: str = Form("active")):
+    if not is_authenticated(request): return RedirectResponse(url="/login")
     database.update_customer_full(cust_id, name, phone, password, package_name, package_price, profile, expiry_date, status)
     cust = database.get_customer_by_id(cust_id)
     if cust:
@@ -841,51 +536,41 @@ async def update_customer_action(request: Request, background_tasks: BackgroundT
 
 @app.get("/admin/quick-extend/{cust_id}")
 async def quick_extend_action(request: Request, background_tasks: BackgroundTasks, cust_id: int):
-    if not is_authenticated(request):
-        return RedirectResponse(url="/login")
+    if not is_authenticated(request): return RedirectResponse(url="/login")
     username, _ = database.extend_customer(cust_id, days=30)
-    if username:
-        background_tasks.add_task(unblock_in_mikrotik, username)
+    if username: background_tasks.add_task(unblock_in_mikrotik, username)
     return RedirectResponse(url="/admin", status_code=303)
 
 
 @app.get("/admin/toggle-suspend/{cust_id}")
 async def toggle_suspend_action(request: Request, background_tasks: BackgroundTasks, cust_id: int):
-    if not is_authenticated(request):
-        return RedirectResponse(url="/login")
+    if not is_authenticated(request): return RedirectResponse(url="/login")
     cust = database.get_customer_by_id(cust_id)
     if cust:
-        new_status = "expired" if cust["status"] == "active" else "active"
-        database.update_customer_full(cust_id, cust["name"], cust["phone"], cust["password"], cust["package_name"], cust["package_price"], cust["profile"], cust["expiry_date"], new_status)
-        background_tasks.add_task(unblock_in_mikrotik if new_status == "active" else block_in_mikrotik, cust["username"])
+        ns = "expired" if cust["status"] == "active" else "active"
+        database.update_customer_full(cust_id, cust["name"], cust["phone"], cust["password"], cust["package_name"], cust["package_price"], cust["profile"], cust["expiry_date"], ns)
+        background_tasks.add_task(unblock_in_mikrotik if ns == "active" else block_in_mikrotik, cust["username"])
     return RedirectResponse(url="/admin", status_code=303)
 
 
 @app.get("/admin/kick/{username}")
 async def kick_user_action(request: Request, username: str):
-    if not is_authenticated(request):
-        return RedirectResponse(url="/login")
+    if not is_authenticated(request): return RedirectResponse(url="/login")
     try:
-        api = get_mikrotik_conn()
-        api.kick_user(username)
-        api.close()
-    except Exception as e:
-        logger.error(f"Kick failed: {e}")
+        api = get_mikrotik_conn(); api.kick_user(username); api.close()
+    except Exception: pass
     return RedirectResponse(url="/admin", status_code=303)
 
 
 @app.get("/admin/bind-mac/{cust_id}")
 async def bind_mac_action(request: Request, cust_id: int, mac: str = "", unbind: int = 0):
-    if not is_authenticated(request):
-        return RedirectResponse(url="/login")
+    if not is_authenticated(request): return RedirectResponse(url="/login")
     cust = database.get_customer_by_id(cust_id)
     if cust:
-        target_mac = "" if unbind else mac.strip()
+        tmac = "" if unbind else mac.strip()
         try:
-            api = get_mikrotik_conn()
-            api.bind_mac(cust["username"], target_mac)
-            api.close()
-            database.update_customer_mac(cust_id, target_mac)
+            api = get_mikrotik_conn(); api.bind_mac(cust["username"], tmac); api.close()
+            database.update_customer_mac(cust_id, tmac)
         except Exception as e:
             return RedirectResponse(url=f"/admin?msg=MAC+Bind+ত্রুটি:+{e}", status_code=303)
     return RedirectResponse(url="/admin", status_code=303)
@@ -893,29 +578,24 @@ async def bind_mac_action(request: Request, cust_id: int, mac: str = "", unbind:
 
 @app.get("/admin/delete/{cust_id}")
 async def delete_customer_action(request: Request, background_tasks: BackgroundTasks, cust_id: int):
-    if not is_authenticated(request):
-        return RedirectResponse(url="/login")
+    if not is_authenticated(request): return RedirectResponse(url="/login")
     username = database.delete_customer(cust_id)
-    if username:
-        background_tasks.add_task(delete_secret_from_mikrotik, username)
+    if username: background_tasks.add_task(delete_secret_from_mikrotik, username)
     return RedirectResponse(url="/admin", status_code=303)
 
 
 @app.get("/admin/sync-mikrotik")
 async def sync_mikrotik_users(request: Request):
-    if not is_authenticated(request):
-        return RedirectResponse(url="/login")
+    if not is_authenticated(request): return RedirectResponse(url="/login")
     try:
-        api = get_mikrotik_conn()
-        secrets_list = api.get_all_secrets()
-        api.close()
+        api = get_mikrotik_conn(); secrets_list = api.get_all_secrets(); api.close()
         added = database.upsert_synced_secrets(secrets_list)
-        return RedirectResponse(url=f"/admin?msg=MikroTik+থেকে+মোট+{len(secrets_list)}+টি+পাওয়া+গেছে,+নতুন+{added}+জন+যুক্ত+হয়েছে।", status_code=303)
+        return RedirectResponse(url=f"/admin?msg=MikroTik+থেকে+{len(secrets_list)}+টি+পাওয়া+গেছে,+নতুন+{added}+জন+যুক্ত+হয়েছে।", status_code=303)
     except Exception as e:
         return RedirectResponse(url=f"/admin?msg=MikroTik+সিঙ্ক+ব্যর্থ:+{e}", status_code=303)
 
 
-# --- OLT MONITOR ---
+# --- OLT MONITOR (1-Click VLAN + Customer Name + MAC + SN) ---
 @app.get("/admin/olt", response_class=HTMLResponse)
 async def olt_dashboard(request: Request, pon_id: str = "2", msg: Optional[str] = None):
     if not is_authenticated(request):
@@ -923,144 +603,142 @@ async def olt_dashboard(request: Request, pon_id: str = "2", msg: Optional[str] 
 
     company = h(get_company_name())
     customers = database.get_all_customers()
-    cust_by_onu = {(int(c["olt_pon"] or 0), int(c["olt_onuid"] or 0)): c for c in customers if c.get("olt_pon") and c.get("olt_onuid")}
 
-    olt_data = {"pon_ports": [], "onus": [], "online": 0, "offline": 0, "total": 0}
+    actives = {}
+    try:
+        api = get_mikrotik_conn(); actives = api.get_active_pppoe(); api.close()
+    except Exception: pass
+
+    cust_by_onu, cust_by_sn = {}, {}
+    for c in customers:
+        if c.get("olt_pon") and c.get("olt_onuid"):
+            cust_by_onu[(int(c["olt_pon"]), int(c["olt_onuid"]))] = c
+        if c.get("onu_sn"):
+            cust_by_sn[c["onu_sn"].strip().upper()] = c
+
+    olt_data = {"pon_ports": [], "onus": [], "online": 0, "offline": 0, "total": 0, "line_profiles": [], "service_profiles": [], "vlan_presets": []}
     olt_error = ""
     try:
-        olt = get_olt_conn()
-        olt_data = olt.get_onus(pon_id=None if pon_id == "all" else pon_id)
+        olt_data = get_olt_conn().get_onus(pon_id=None if pon_id == "all" else pon_id)
     except Exception as e:
         olt_error = str(e)
 
     pon_buttons = f'<a href="/admin/olt?pon_id=all" class="btn btn-sm {"btn-primary" if pon_id == "all" else "btn-outline-primary"} fw-bold">সব PON</a>'
     for p in olt_data["pon_ports"]:
-        active = "btn-primary" if str(p["id"]) == str(pon_id) else "btn-outline-primary"
-        pon_buttons += f' <a href="/admin/olt?pon_id={p["id"]}" class="btn btn-sm {active} fw-bold">{h(p["name"])}</a>'
+        pon_buttons += f' <a href="/admin/olt?pon_id={p["id"]}" class="btn btn-sm {"btn-primary" if str(p["id"])==str(pon_id) else "btn-outline-primary"} fw-bold">{h(p["name"])}</a>'
 
-    cust_options = "".join(f'<option value="{c["id"]}">{h(c["name"] or c["username"])} ({h(c["username"])})</option>' for c in customers)
+    cust_options = "".join(f'<option value="{c["id"]}">{h(c["name"] or c["username"])} ({h(c["username"])}) {h(c.get("phone") or "")}</option>' for c in customers)
+    line_opts = "".join(f'<option value="{h(lp)}">{h(lp)}</option>' for lp in (olt_data.get("line_profiles") or ["line_vlan_712", "line_vlan_200", "2101", "N/A"]))
+    srv_opts = "".join(f'<option value="{h(sp)}">{h(sp)}</option>' for sp in (olt_data.get("service_profiles") or ["srv_vlan712", "srv_vlan200", "2101", "N/A"]))
+    presets = olt_data.get("vlan_presets") or []
 
     rows_html = ""
     for o in olt_data["onus"]:
         st_badge = '<span class="badge bg-success">Online</span>' if o["online"] else '<span class="badge bg-danger">Offline</span>'
-        linked = cust_by_onu.get((o["pon_id"], o["onu_id"]))
-        linked_html = f'<span class="badge bg-primary-subtle text-primary border border-primary-subtle">{h(linked["name"] or linked["username"])}</span>' if linked else '<span class="text-muted small">লিংক করা নেই</span>'
+        linked = cust_by_onu.get((o["pon_id"], o["onu_id"])) or cust_by_sn.get((o["sn"] or "").strip().upper())
+
+        cust_search_extra = ""
+        if linked:
+            uname = linked["username"]
+            act = actives.get(uname, {})
+            cust_mac = act.get("caller_id") or linked.get("mac_address") or ""
+            cname = h(linked["name"] or uname)
+            st_pill = '<span class="badge bg-success-subtle text-success">Active</span>' if linked["status"] == "active" else '<span class="badge bg-danger-subtle text-danger">Expired</span>'
+            phone_str = f'<div class="small text-muted"><i class="fa-solid fa-phone text-primary"></i> {h(linked["phone"])}</div>' if linked.get("phone") else ""
+            mac_str = f'<div class="small text-muted"><i class="fa-solid fa-fingerprint"></i> MAC: <b>{h(cust_mac)}</b></div>' if cust_mac else ""
+            linked_html = f'<div class="fw-bold text-primary">{cname} <small class="text-dark">({h(uname)})</small> {st_pill}</div>{phone_str}{mac_str}'
+            cust_search_extra = f"{uname} {linked.get('name','')} {linked.get('phone','')} {cust_mac}"
+        else:
+            linked_html = '<span class="text-muted small">লিংক করা নেই</span>'
+
+        cur_vlan = o.get("vlan", "N/A")
+        vlan_badge = f'<span class="badge bg-primary fs-6">VLAN {h(cur_vlan)}</span>' if cur_vlan != "N/A" else '<span class="badge bg-secondary">N/A</span>'
+        prof_sub = f'<div class="small text-muted">{h(o.get("line_profile","N/A"))} / {h(o.get("service_profile","N/A"))}</div>'
+
+        quick_vlan_btns = ""
+        for pr in presets:
+            is_cur = (pr["linename"] == o.get("line_profile"))
+            btn_cls = "btn-secondary disabled" if is_cur else "btn-outline-success"
+            quick_vlan_btns += f"""
+            <form method="POST" action="/admin/olt/change-vlan" class="d-inline">
+                <input type="hidden" name="pon_id" value="{o['pon_id']}"><input type="hidden" name="onu_id" value="{o['onu_id']}">
+                <input type="hidden" name="linename" value="{h(pr['linename'])}"><input type="hidden" name="srvname" value="{h(pr['srvname'])}">
+                <input type="hidden" name="back_pon" value="{h(pon_id)}">
+                <button type="submit" class="btn btn-sm {btn_cls} fw-bold" onclick="return confirm('GPON0/{o['pon_id']}:{o['onu_id']} এর VLAN পরিবর্তন করে {h(pr['vlan'])} করবেন?');">VLAN {h(pr['vlan'])}</button>
+            </form>"""
+
+        search_blob = f"{o['label']} {o['sn']} {o['description']} {o['model']} {cur_vlan} {cust_search_extra}".lower()
         rows_html += f"""
-        <tr class="onu-row" data-search="{h((o['label'] + ' ' + o['sn'] + ' ' + o['description'] + ' ' + o['model']).lower())}">
-            <td class="fw-bold">{h(o['label'])}</td>
+        <tr class="onu-row" data-search="{h(search_blob)}">
+            <td><div class="fw-bold">{h(o['label'])}</div><small class="text-muted">{h(o['model'])}</small></td>
             <td>{st_badge}</td>
-            <td>{h(o['description'])}</td>
-            <td>{h(o['model'])}</td>
-            <td><code>{h(o['sn'])}</code></td>
             <td>{linked_html}</td>
-            <td>
-                <button class="btn btn-sm btn-info text-white fw-bold" onclick="openOpticalModal({o['pon_id']}, {o['onu_id']}, '{h(o['sn'])}')"><i class="fa-solid fa-signal"></i> Power</button>
-                <button class="btn btn-sm btn-outline-primary fw-bold" onclick="openLinkModal({o['pon_id']}, {o['onu_id']}, '{h(o['sn'])}')"><i class="fa-solid fa-link"></i> Link</button>
+            <td><code>{h(o['sn'])}</code><div class="small text-muted">{h(o['description'])}</div></td>
+            <td>{vlan_badge}{prof_sub}</td>
+            <td><div class="d-flex flex-wrap gap-1">{quick_vlan_btns}
+                <button type="button" class="btn btn-sm btn-outline-dark" onclick="openVlanModal({o['pon_id']},{o['onu_id']},'{h(o.get('line_profile','N/A'))}','{h(o.get('service_profile','N/A'))}')">Custom</button>
+            </div></td>
+            <td class="text-nowrap">
+                <button class="btn btn-sm btn-info text-white fw-bold" onclick="openOpticalModal({o['pon_id']},{o['onu_id']},'{h(o['sn'])}')"><i class="fa-solid fa-signal"></i> Power</button>
+                <button class="btn btn-sm btn-outline-primary fw-bold" onclick="openLinkModal({o['pon_id']},{o['onu_id']},'{h(o['sn'])}')"><i class="fa-solid fa-link"></i> Link</button>
                 <a href="/admin/olt/reboot?pon_id={o['pon_id']}&onu_id={o['onu_id']}&back_pon={h(pon_id)}" onclick="return confirm('এই ONU টি রিবুট করবেন?');" class="btn btn-sm btn-outline-danger"><i class="fa-solid fa-rotate-right"></i></a>
             </td>
         </tr>"""
 
-    err_html = f'<div class="alert alert-danger"><b>OLT কানেকশন ত্রুটি:</b> {h(olt_error)} — অনুগ্রহ করে <a href="/admin/settings">Settings</a> পেজ থেকে OLT URL ও পাসওয়ার্ড চেক করুন।</div>' if olt_error else ""
-    msg_html = f'<div class="alert alert-success">{h(msg)}</div>' if msg else ""
+    err_html = f'<div class="alert alert-danger"><b>OLT কানেকশন ত্রুটি:</b> {h(olt_error)} — <a href="/admin/settings">Settings</a> চেক করুন।</div>' if olt_error else ""
+    msg_html = f'<div class="alert alert-success alert-dismissible fade show">{h(msg)}<button type="button" class="btn-close" data-bs-dismiss="alert"></button></div>' if msg else ""
 
-    return f"""<!DOCTYPE html>
-<html lang="bn">
-<head>
-    <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{company} - OLT Monitor</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <style>body {{ background: #eef2f6; font-family: 'Segoe UI', sans-serif; }}</style>
-</head>
-<body class="p-2 p-md-4">
-<div class="container-fluid">
-    {admin_navbar("olt")}
-    {msg_html}
-    {err_html}
-
+    return f"""<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{company} - OLT Monitor</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+<style>body{{background:#eef2f6;font-family:'Segoe UI',sans-serif;}}</style>
+</head><body class="p-2 p-md-4"><div class="container-fluid">
+    {admin_navbar("olt")} {msg_html} {err_html}
     <div class="row g-3 mb-3">
         <div class="col-4"><div class="card p-3 bg-primary text-white border-0"><small>মোট ONU</small><h3 class="fw-bold mb-0">{olt_data['total']}</h3></div></div>
         <div class="col-4"><div class="card p-3 bg-success text-white border-0"><small>অনলাইন</small><h3 class="fw-bold mb-0">{olt_data['online']}</h3></div></div>
         <div class="col-4"><div class="card p-3 bg-danger text-white border-0"><small>অফলাইন</small><h3 class="fw-bold mb-0">{olt_data['offline']}</h3></div></div>
     </div>
-
-    <div class="card p-3 mb-3 border-0 shadow-sm">
-        <div class="d-flex flex-wrap justify-content-between align-items-center gap-2">
-            <div class="d-flex flex-wrap gap-1">{pon_buttons}</div>
-            <input type="text" id="onuSearch" class="form-control" style="max-width:300px;" placeholder="SN, Model বা ONU দিয়ে খুঁজুন..." onkeyup="filterOnus()">
-        </div>
-    </div>
-
-    <div class="card border-0 shadow-sm">
-        <div class="table-responsive">
-            <table class="table table-hover align-middle mb-0">
-                <thead class="table-light"><tr><th>ONU ID</th><th>Status</th><th>Description</th><th>Model</th><th>Serial (SN)</th><th>গ্রাহক</th><th>Action</th></tr></thead>
-                <tbody>{rows_html or '<tr><td colspan="7" class="text-center py-4 text-muted">কোনো ONU পাওয়া যায়নি</td></tr>'}</tbody>
-            </table>
-        </div>
-    </div>
+    <div class="card p-3 mb-3 border-0 shadow-sm"><div class="d-flex flex-wrap justify-content-between align-items-center gap-2"><div class="d-flex flex-wrap gap-1">{pon_buttons}</div><input type="text" id="onuSearch" class="form-control" style="max-width:340px;" placeholder="গ্রাহকের নাম, MAC, SN, VLAN বা ONU খুঁজুন..." onkeyup="filterOnus()"></div></div>
+    <div class="card border-0 shadow-sm"><div class="table-responsive"><table class="table table-hover align-middle mb-0">
+        <thead class="table-light"><tr><th>ONU / Model</th><th>Status</th><th>গ্রাহক ও MAC</th><th>Serial (SN)</th><th>বর্তমান VLAN</th><th>১-ক্লিক VLAN বদল</th><th>Action</th></tr></thead>
+        <tbody>{rows_html or '<tr><td colspan="7" class="text-center py-4 text-muted">কোনো ONU পাওয়া যায়নি</td></tr>'}</tbody>
+    </table></div></div>
 </div>
 
-<!-- Optical Modal -->
-<div class="modal fade" id="opticalModal" tabindex="-1"><div class="modal-dialog modal-dialog-centered"><div class="modal-content border-0 shadow">
-    <div class="modal-header bg-dark text-white"><h5 class="modal-title fw-bold"><i class="fa-solid fa-signal text-info me-2"></i>ONU Optical Power</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div>
-    <div class="modal-body" id="opticalModalBody">লোড হচ্ছে...</div>
-</div></div></div>
+<div class="modal fade" id="opticalModal" tabindex="-1"><div class="modal-dialog modal-dialog-centered"><div class="modal-content border-0 shadow"><div class="modal-header bg-dark text-white"><h5 class="modal-title fw-bold"><i class="fa-solid fa-signal text-info me-2"></i>ONU Optical Power</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div><div class="modal-body" id="opticalModalBody">লোড হচ্ছে...</div></div></div></div>
 
-<!-- Link Customer Modal -->
-<div class="modal fade" id="linkModal" tabindex="-1"><div class="modal-dialog modal-dialog-centered"><div class="modal-content border-0 shadow">
-    <div class="modal-header bg-primary text-white"><h5 class="modal-title fw-bold">গ্রাহকের সাথে ONU লিংক করুন</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div>
-    <form method="POST" action="/admin/olt/link">
-        <div class="modal-body">
-            <input type="hidden" name="pon_id" id="linkPon"><input type="hidden" name="onu_id" id="linkOnu"><input type="hidden" name="onu_sn" id="linkSn">
-            <p class="small text-muted" id="linkLabel"></p>
-            <label class="form-label fw-bold">গ্রাহক সিলেক্ট করুন:</label>
-            <select name="cust_id" class="form-select" required>{cust_options}</select>
-        </div>
-        <div class="modal-footer"><button type="submit" class="btn btn-primary fw-bold">লিংক সেভ করুন</button></div>
-    </form>
-</div></div></div>
+<div class="modal fade" id="linkModal" tabindex="-1"><div class="modal-dialog modal-dialog-centered"><div class="modal-content border-0 shadow"><div class="modal-header bg-primary text-white"><h5 class="modal-title fw-bold">গ্রাহকের সাথে ONU লিংক করুন</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div>
+<form method="POST" action="/admin/olt/link"><div class="modal-body"><input type="hidden" name="pon_id" id="linkPon"><input type="hidden" name="onu_id" id="linkOnu"><input type="hidden" name="onu_sn" id="linkSn"><input type="hidden" name="back_pon" value="{h(pon_id)}"><p class="small text-muted" id="linkLabel"></p><label class="form-label fw-bold">গ্রাহক সিলেক্ট করুন:</label><select name="cust_id" class="form-select" required>{cust_options}</select></div><div class="modal-footer"><button type="submit" class="btn btn-primary fw-bold">লিংক সেভ করুন</button></div></form></div></div></div>
+
+<div class="modal fade" id="vlanModal" tabindex="-1"><div class="modal-dialog modal-dialog-centered"><div class="modal-content border-0 shadow"><div class="modal-header bg-dark text-white"><h5 class="modal-title fw-bold">কাস্টম VLAN / Profile সেট করুন</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div>
+<form method="POST" action="/admin/olt/change-vlan"><div class="modal-body"><input type="hidden" name="pon_id" id="vPon"><input type="hidden" name="onu_id" id="vOnu"><input type="hidden" name="back_pon" value="{h(pon_id)}"><p class="fw-bold" id="vLabel"></p><div class="mb-3"><label class="form-label fw-bold">Line Profile</label><select name="linename" id="vLine" class="form-select">{line_opts}</select></div><div class="mb-3"><label class="form-label fw-bold">Service Profile</label><select name="srvname" id="vSrv" class="form-select">{srv_opts}</select></div></div><div class="modal-footer"><button type="submit" class="btn btn-success fw-bold">VLAN সেভ করুন</button></div></form></div></div></div>
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 <script>
-function filterOnus() {{
-    const q = document.getElementById("onuSearch").value.toLowerCase();
-    document.querySelectorAll(".onu-row").forEach(r => r.style.display = r.getAttribute("data-search").includes(q) ? "" : "none");
-}}
-function openLinkModal(pon, onuid, sn) {{
-    document.getElementById("linkPon").value = pon;
-    document.getElementById("linkOnu").value = onuid;
-    document.getElementById("linkSn").value = sn;
-    document.getElementById("linkLabel").innerText = `ONU: GPON0/${{pon}}:${{onuid}} (SN: ${{sn}})`;
-    new bootstrap.Modal(document.getElementById("linkModal")).show();
-}}
-async function openOpticalModal(pon, onuid, sn) {{
-    const body = document.getElementById("opticalModalBody");
-    body.innerHTML = '<div class="text-center py-4"><div class="spinner-border text-primary"></div><div class="mt-2">OLT থেকে সিগন্যাল তথ্য আনা হচ্ছে...</div></div>';
+function filterOnus(){{const q=document.getElementById("onuSearch").value.toLowerCase();document.querySelectorAll(".onu-row").forEach(r=>r.style.display=r.getAttribute("data-search").includes(q)?"":"none");}}
+function openLinkModal(p,o,sn){{document.getElementById("linkPon").value=p;document.getElementById("linkOnu").value=o;document.getElementById("linkSn").value=sn;document.getElementById("linkLabel").innerText=`ONU: GPON0/${{p}}:${{o}} (SN: ${{sn}})`;new bootstrap.Modal(document.getElementById("linkModal")).show();}}
+function openVlanModal(p,o,lp,sp){{document.getElementById("vPon").value=p;document.getElementById("vOnu").value=o;document.getElementById("vLabel").innerText=`ONU: GPON0/${{p}}:${{o}}`;document.getElementById("vLine").value=lp;document.getElementById("vSrv").value=sp;new bootstrap.Modal(document.getElementById("vlanModal")).show();}}
+async function openOpticalModal(p,o,sn){{
+    const b=document.getElementById("opticalModalBody");b.innerHTML='<div class="text-center py-4"><div class="spinner-border text-primary"></div><div class="mt-2">লোড হচ্ছে...</div></div>';
     new bootstrap.Modal(document.getElementById("opticalModal")).show();
-    try {{
-        const res = await fetch(`/api/olt/optical?pon_id=${{pon}}&onu_id=${{onuid}}`);
-        const d = await res.json();
-        if (d.error) {{ body.innerHTML = `<div class="alert alert-danger">${{d.error}}</div>`; return; }}
-        let sigBadge = '<span class="badge bg-secondary">Unknown</span>';
-        if (d.rx_dbm !== null && d.rx_dbm !== undefined) {{
-            if (d.rx_dbm >= -25) sigBadge = '<span class="badge bg-success">ভালো (Good)</span>';
-            else if (d.rx_dbm >= -27.5) sigBadge = '<span class="badge bg-warning text-dark">দুর্বল হচ্ছে</span>';
-            else sigBadge = '<span class="badge bg-danger">খুব দুর্বল / Critical</span>';
-        }}
-        body.innerHTML = `
-            <div class="mb-2"><b>ONU:</b> GPON0/${{pon}}:${{onuid}} (${{sn}}) ${{sigBadge}}</div>
-            <table class="table table-bordered table-sm mb-0">
-                <tr><th>Rx Optical Power</th><td class="fw-bold text-primary">${{d.rx_power}}</td></tr>
-                <tr><th>Tx Optical Power</th><td>${{d.tx_power}}</td></tr>
-                <tr><th>Distance</th><td>${{d.distance}}</td></tr>
-                <tr><th>Temperature</th><td>${{d.temperature}}</td></tr>
-                <tr><th>Voltage / Bias</th><td>${{d.voltage}} / ${{d.bias_current}}</td></tr>
-            </table>`;
-    }} catch (e) {{ body.innerHTML = `<div class="alert alert-danger">ত্রুটি: ${{e}}</div>`; }}
+    try{{const r=await fetch(`/api/olt/optical?pon_id=${{p}}&onu_id=${{o}}`);const d=await r.json();if(d.error){{b.innerHTML=`<div class="alert alert-danger">${{d.error}}</div>`;return;}}
+    let sb='<span class="badge bg-secondary">Unknown</span>';if(d.rx_dbm!==null&&d.rx_dbm!==undefined){{sb=d.rx_dbm>=-25?'<span class="badge bg-success">ভালো (Good)</span>':(d.rx_dbm>=-27.5?'<span class="badge bg-warning text-dark">দুর্বল হচ্ছে</span>':'<span class="badge bg-danger">খুব দুর্বল / Critical</span>');}}
+    b.innerHTML=`<div class="mb-2"><b>ONU:</b> GPON0/${{p}}:${{o}} (${{sn}}) ${{sb}}</div><table class="table table-bordered table-sm mb-0"><tr><th>Rx Power</th><td class="fw-bold text-primary">${{d.rx_power}}</td></tr><tr><th>Tx Power</th><td>${{d.tx_power}}</td></tr><tr><th>Distance</th><td>${{d.distance}}</td></tr><tr><th>Temperature</th><td>${{d.temperature}}</td></tr><tr><th>Voltage / Bias</th><td>${{d.voltage}} / ${{d.bias_current}}</td></tr></table>`;}}catch(e){{b.innerHTML=`<div class="alert alert-danger">${{e}}</div>`;}}
 }}
-</script>
-</body></html>"""
+</script></body></html>"""
+
+
+@app.post("/admin/olt/change-vlan")
+async def olt_change_vlan(request: Request, pon_id: int = Form(...), onu_id: int = Form(...), linename: str = Form(...), srvname: str = Form(...), back_pon: str = Form("2")):
+    if not is_authenticated(request):
+        return RedirectResponse(url="/login")
+    try:
+        get_olt_conn().set_onu_vlan_profile(pon_id, onu_id, linename, srvname)
+        return RedirectResponse(url=f"/admin/olt?pon_id={back_pon}&msg=GPON0/{pon_id}:{onu_id}+এর+VLAN+({linename})+সফলভাবে+পরিবর্তন+হয়েছে!", status_code=303)
+    except Exception as e:
+        return RedirectResponse(url=f"/admin/olt?pon_id={back_pon}&msg=VLAN+পরিবর্তন+ব্যর্থ:+{e}", status_code=303)
 
 
 @app.get("/api/olt/optical")
@@ -1068,18 +746,17 @@ async def api_olt_optical(request: Request, pon_id: int, onu_id: int):
     if not is_authenticated(request):
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     try:
-        olt = get_olt_conn()
-        return olt.get_onu_optical(pon_id, onu_id)
+        return get_olt_conn().get_onu_optical(pon_id, onu_id)
     except Exception as e:
         return {"error": str(e)}
 
 
 @app.post("/admin/olt/link")
-async def olt_link_customer(request: Request, cust_id: int = Form(...), pon_id: int = Form(...), onu_id: int = Form(...), onu_sn: str = Form("")):
+async def olt_link_customer(request: Request, cust_id: int = Form(...), pon_id: int = Form(...), onu_id: int = Form(...), onu_sn: str = Form(""), back_pon: str = Form("2")):
     if not is_authenticated(request):
         return RedirectResponse(url="/login")
     database.link_customer_onu(cust_id, pon_id, onu_id, onu_sn)
-    return RedirectResponse(url=f"/admin/olt?pon_id={pon_id}&msg=গ্রাহকের+সাথে+ONU+লিংক+করা+হয়েছে!", status_code=303)
+    return RedirectResponse(url=f"/admin/olt?pon_id={back_pon}&msg=গ্রাহকের+সাথে+ONU+লিংক+করা+হয়েছে!", status_code=303)
 
 
 @app.get("/admin/olt/reboot")
@@ -1087,8 +764,7 @@ async def olt_reboot_onu(request: Request, pon_id: int, onu_id: int, back_pon: s
     if not is_authenticated(request):
         return RedirectResponse(url="/login")
     try:
-        olt = get_olt_conn()
-        olt.reboot_onu(pon_id, onu_id)
+        get_olt_conn().reboot_onu(pon_id, onu_id)
         return RedirectResponse(url=f"/admin/olt?pon_id={back_pon}&msg=GPON0/{pon_id}:{onu_id}+রিবুট+কমান্ড+পাঠানো+হয়েছে!", status_code=303)
     except Exception as e:
         return RedirectResponse(url=f"/admin/olt?pon_id={back_pon}&msg=Reboot+ব্যর্থ:+{e}", status_code=303)
@@ -1099,7 +775,6 @@ async def olt_reboot_onu(request: Request, pon_id: int, onu_id: int, back_pon: s
 async def settings_page(request: Request, msg: Optional[str] = None):
     if not is_authenticated(request):
         return RedirectResponse(url="/login")
-
     s = database.get_all_settings()
     company = h(s.get("company_name", "সাইফুল ডিস এন্ড ইন্টারনেট 🛜"))
     r_opts = "".join(f'<option value="{k}" {"selected" if s.get("router_driver")==k else ""}>{k}</option>' for k in ROUTER_DRIVERS.keys())
@@ -1108,161 +783,73 @@ async def settings_page(request: Request, msg: Optional[str] = None):
     db_status = '<span class="badge bg-success fs-6">PostgreSQL চালু আছে (ডেটা স্থায়ী থাকবে ✅)</span>' if database.IS_POSTGRES else '<span class="badge bg-warning text-dark fs-6">SQLite চলছে (Render-এ স্থায়ী করতে DATABASE_URL দিন ⚠️)</span>'
     msg_html = f'<div class="alert alert-success alert-dismissible fade show">{h(msg)}<button type="button" class="btn-close" data-bs-dismiss="alert"></button></div>' if msg else ""
 
-    return f"""<!DOCTYPE html>
-<html lang="bn">
-<head>
-    <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{company} - Settings</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <style>body {{ background: #eef2f6; font-family: 'Segoe UI', sans-serif; }}</style>
-</head>
-<body class="p-2 p-md-4">
-<div class="container">
-    {admin_navbar("settings")}
-    {msg_html}
-
-    <form method="POST" action="/admin/settings/save">
-        <div class="row g-4">
-            <div class="col-md-6">
-                <div class="card border-0 shadow-sm h-100">
-                    <div class="card-header bg-primary text-white fw-bold"><i class="fa-solid fa-router me-2"></i>MikroTik / রাউটার কনফিগারেশন</div>
-                    <div class="card-body">
-                        <div class="mb-2"><label class="form-label fw-bold">Router Driver (ভবিষ্যতে মডেল বদলালে)</label><select name="router_driver" class="form-select">{r_opts}</select></div>
-                        <div class="mb-2"><label class="form-label fw-bold">MikroTik Host / DDNS</label><input type="text" name="mikrotik_host" class="form-control" value="{h(s.get('mikrotik_host',''))}" placeholder="যেমন: remote1.dslabbd.com"></div>
-                        <div class="mb-2"><label class="form-label fw-bold">API Port</label><input type="text" name="mikrotik_port" class="form-control" value="{h(s.get('mikrotik_port','8728'))}"></div>
-                        <div class="mb-2"><label class="form-label fw-bold">Username</label><input type="text" name="mikrotik_user" class="form-control" value="{h(s.get('mikrotik_user','admin'))}"></div>
-                        <div class="mb-2"><label class="form-label fw-bold">Password (বদলাতে না চাইলে ফাঁকা রাখুন)</label><input type="password" name="mikrotik_pass" class="form-control" placeholder="••••••••"></div>
-                        <div class="mb-3"><label class="form-label fw-bold">ব্লকিং পদ্ধতি</label>
-                            <select name="block_mode" class="form-select">
-                                <option value="address_list" {"selected" if bm=='address_list' else ''}>Expired-Users Address List (রেকমেন্ডেড)</option>
-                                <option value="disable_secret" {"selected" if bm=='disable_secret' else ''}>Disable PPPoE Secret</option>
-                                <option value="both" {"selected" if bm=='both' else ''}>উভয়ই (Address List + Disable Secret)</option>
-                            </select>
-                        </div>
-                        <button type="button" class="btn btn-outline-primary btn-sm fw-bold" onclick="testConn('/api/test-mikrotik', 'mkTestRes')"><i class="fa-solid fa-plug me-1"></i> MikroTik টেস্ট করুন</button>
-                        <div id="mkTestRes" class="mt-2 small"></div>
-                    </div>
-                </div>
-            </div>
-
-            <div class="col-md-6">
-                <div class="card border-0 shadow-sm h-100">
-                    <div class="card-header bg-dark text-white fw-bold"><i class="fa-solid fa-server me-2 text-info"></i>OLT কনফিগারেশন</div>
-                    <div class="card-body">
-                        <div class="mb-2"><label class="form-label fw-bold">OLT Driver (মডেল)</label><select name="olt_driver" class="form-select">{o_opts}</select></div>
-                        <div class="mb-2"><label class="form-label fw-bold">OLT Web URL</label><input type="text" name="olt_url" class="form-control" value="{h(s.get('olt_url',''))}" placeholder="যেমন: https://remote1.dslabbd.com:32248"></div>
-                        <div class="mb-2"><label class="form-label fw-bold">OLT Username</label><input type="text" name="olt_user" class="form-control" value="{h(s.get('olt_user','admin'))}"></div>
-                        <div class="mb-3"><label class="form-label fw-bold">OLT Password (বদলাতে না চাইলে ফাঁকা রাখুন)</label><input type="password" name="olt_pass" class="form-control" placeholder="••••••••"></div>
-                        <button type="button" class="btn btn-outline-dark btn-sm fw-bold" onclick="testConn('/api/test-olt', 'oltTestRes')"><i class="fa-solid fa-plug me-1"></i> OLT টেস্ট করুন</button>
-                        <div id="oltTestRes" class="mt-2 small"></div>
-
-                        <hr class="my-3">
-                        <h6 class="fw-bold">কোম্পানি, বিকাশ ও অ্যাডমিন পাসওয়ার্ড</h6>
-                        <div class="mb-2"><label class="form-label fw-bold">ISP নাম</label><input type="text" name="company_name" class="form-control" value="{company}"></div>
-                        <div class="mb-2"><label class="form-label fw-bold">বিকাশ পার্সোনাল নম্বর</label><input type="text" name="bkash_number" class="form-control" value="{h(s.get('bkash_number',''))}"></div>
-                        <div class="mb-2"><label class="form-label fw-bold">নতুন অ্যাডমিন পাসওয়ার্ড (না বদলালে ফাঁকা রাখুন)</label><input type="password" name="new_admin_password" class="form-control" placeholder="••••••••"></div>
-                    </div>
-                </div>
-            </div>
-        </div>
-        <div class="text-end mt-3"><button type="submit" class="btn btn-success btn-lg fw-bold px-5"><i class="fa-solid fa-floppy-disk me-2"></i> সব Settings সেভ করুন</button></div>
-    </form>
-
-    <div class="card border-0 shadow-sm mt-4 p-4">
-        <div class="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-2">
-            <h5 class="fw-bold mb-0"><i class="fa-solid fa-database me-2 text-primary"></i>ডাটাবেস ও ব্যাকআপ</h5>
-            {db_status}
-        </div>
-        <div class="row g-3 align-items-center">
-            <div class="col-md-5"><a href="/admin/backup/download" class="btn btn-outline-primary fw-bold w-100"><i class="fa-solid fa-download me-2"></i> সম্পূর্ণ ব্যাকআপ ডাউনলোড (.JSON)</a></div>
-            <div class="col-md-7">
-                <form method="POST" action="/admin/backup/restore" enctype="multipart/form-data" class="d-flex gap-2">
-                    <input type="file" name="backup_file" accept=".json" class="form-control" required>
-                    <button type="submit" class="btn btn-warning fw-bold text-nowrap">রিস্টোর করুন</button>
-                </form>
-            </div>
-        </div>
-    </div>
+    return f"""<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{company} - Settings</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+<style>body{{background:#eef2f6;font-family:'Segoe UI',sans-serif;}}</style>
+</head><body class="p-2 p-md-4"><div class="container">
+    {admin_navbar("settings")} {msg_html}
+    <form method="POST" action="/admin/settings/save"><div class="row g-4">
+        <div class="col-md-6"><div class="card border-0 shadow-sm h-100"><div class="card-header bg-primary text-white fw-bold">MikroTik / রাউটার কনফিগারেশন</div><div class="card-body">
+            <div class="mb-2"><label class="form-label fw-bold">Router Driver</label><select name="router_driver" class="form-select">{r_opts}</select></div>
+            <div class="mb-2"><label class="form-label fw-bold">Host / DDNS</label><input type="text" name="mikrotik_host" class="form-control" value="{h(s.get('mikrotik_host',''))}"></div>
+            <div class="mb-2"><label class="form-label fw-bold">API Port</label><input type="text" name="mikrotik_port" class="form-control" value="{h(s.get('mikrotik_port','8728'))}"></div>
+            <div class="mb-2"><label class="form-label fw-bold">Username</label><input type="text" name="mikrotik_user" class="form-control" value="{h(s.get('mikrotik_user','admin'))}"></div>
+            <div class="mb-2"><label class="form-label fw-bold">Password (না বদলালে ফাঁকা রাখুন)</label><input type="password" name="mikrotik_pass" class="form-control" placeholder="••••••••"></div>
+            <div class="mb-3"><label class="form-label fw-bold">ব্লকিং পদ্ধতি</label><select name="block_mode" class="form-select"><option value="address_list" {"selected" if bm=='address_list' else ''}>Expired-Users Address List</option><option value="disable_secret" {"selected" if bm=='disable_secret' else ''}>Disable PPPoE Secret</option><option value="both" {"selected" if bm=='both' else ''}>উভয়ই</option></select></div>
+            <button type="button" class="btn btn-outline-primary btn-sm fw-bold" onclick="testConn('/api/test-mikrotik','mkTestRes')">MikroTik টেস্ট করুন</button><div id="mkTestRes" class="mt-2 small"></div>
+        </div></div></div>
+        <div class="col-md-6"><div class="card border-0 shadow-sm h-100"><div class="card-header bg-dark text-white fw-bold">OLT ও সাধারণ সেটিংস</div><div class="card-body">
+            <div class="mb-2"><label class="form-label fw-bold">OLT Driver</label><select name="olt_driver" class="form-select">{o_opts}</select></div>
+            <div class="mb-2"><label class="form-label fw-bold">OLT Web URL</label><input type="text" name="olt_url" class="form-control" value="{h(s.get('olt_url',''))}"></div>
+            <div class="mb-2"><label class="form-label fw-bold">OLT Username</label><input type="text" name="olt_user" class="form-control" value="{h(s.get('olt_user','admin'))}"></div>
+            <div class="mb-3"><label class="form-label fw-bold">OLT Password (না বদলালে ফাঁকা রাখুন)</label><input type="password" name="olt_pass" class="form-control" placeholder="••••••••"></div>
+            <button type="button" class="btn btn-outline-dark btn-sm fw-bold" onclick="testConn('/api/test-olt','oltTestRes')">OLT টেস্ট করুন</button><div id="oltTestRes" class="mt-2 small"></div><hr class="my-3">
+            <div class="mb-2"><label class="form-label fw-bold">ISP নাম</label><input type="text" name="company_name" class="form-control" value="{company}"></div>
+            <div class="mb-2"><label class="form-label fw-bold">বিকাশ নম্বর</label><input type="text" name="bkash_number" class="form-control" value="{h(s.get('bkash_number',''))}"></div>
+            <div class="mb-2"><label class="form-label fw-bold">নতুন অ্যাডমিন পাসওয়ার্ড</label><input type="password" name="new_admin_password" class="form-control" placeholder="••••••••"></div>
+        </div></div></div>
+    </div><div class="text-end mt-3"><button type="submit" class="btn btn-success btn-lg fw-bold px-5">সব Settings সেভ করুন</button></div></form>
+    <div class="card border-0 shadow-sm mt-4 p-4"><div class="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-2"><h5 class="fw-bold mb-0">ডাটাবেস ও ব্যাকআপ</h5>{db_status}</div>
+    <div class="row g-3 align-items-center"><div class="col-md-5"><a href="/admin/backup/download" class="btn btn-outline-primary fw-bold w-100">ব্যাকআপ ডাউনলোড (.JSON)</a></div>
+    <div class="col-md-7"><form method="POST" action="/admin/backup/restore" enctype="multipart/form-data" class="d-flex gap-2"><input type="file" name="backup_file" accept=".json" class="form-control" required><button type="submit" class="btn btn-warning fw-bold">রিস্টোর</button></form></div></div></div>
 </div>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-<script>
-async function testConn(url, targetId) {{
-    const el = document.getElementById(targetId);
-    el.innerHTML = '<span class="text-primary">টেস্ট করা হচ্ছে...</span>';
-    try {{
-        const res = await fetch(url);
-        const d = await res.json();
-        el.innerHTML = d.ok ? `<span class="text-success fw-bold">✅ সংযোগ সফল! ${{JSON.stringify(d)}}</span>` : `<span class="text-danger fw-bold">❌ ব্যর্থ: ${{d.error}}</span>`;
-    }} catch (e) {{ el.innerHTML = `<span class="text-danger">❌ ${{e}}</span>`; }}
-}}
-</script>
+<script>async function testConn(u,t){{const e=document.getElementById(t);e.innerHTML='টেস্ট হচ্ছে...';try{{const r=await fetch(u);const d=await r.json();e.innerHTML=d.ok?`<span class="text-success fw-bold">✅ সংযোগ সফল! ${{JSON.stringify(d)}}</span>`:`<span class="text-danger fw-bold">❌ ${{d.error}}</span>`;}}catch(x){{e.innerHTML=x;}}}}</script>
 </body></html>"""
 
 
 @app.post("/admin/settings/save")
-async def save_settings_action(
-    request: Request,
-    router_driver: str = Form("mikrotik_api"),
-    mikrotik_host: str = Form(""),
-    mikrotik_port: str = Form("8728"),
-    mikrotik_user: str = Form("admin"),
-    mikrotik_pass: str = Form(""),
-    block_mode: str = Form("address_list"),
-    olt_driver: str = Form("vsol_gpon_web"),
-    olt_url: str = Form(""),
-    olt_user: str = Form("admin"),
-    olt_pass: str = Form(""),
-    company_name: str = Form(""),
-    bkash_number: str = Form(""),
-    new_admin_password: str = Form(""),
-):
-    if not is_authenticated(request):
-        return RedirectResponse(url="/login")
-
-    for k, v in [
-        ("router_driver", router_driver), ("mikrotik_host", mikrotik_host.strip()),
-        ("mikrotik_port", mikrotik_port.strip()), ("mikrotik_user", mikrotik_user.strip()),
-        ("block_mode", block_mode), ("olt_driver", olt_driver),
-        ("olt_url", olt_url.strip()), ("olt_user", olt_user.strip()),
-        ("company_name", company_name.strip()), ("bkash_number", bkash_number.strip()),
-    ]:
+async def save_settings_action(request: Request, router_driver: str = Form("mikrotik_api"), mikrotik_host: str = Form(""), mikrotik_port: str = Form("8728"), mikrotik_user: str = Form("admin"), mikrotik_pass: str = Form(""), block_mode: str = Form("address_list"), olt_driver: str = Form("vsol_gpon_web"), olt_url: str = Form(""), olt_user: str = Form("admin"), olt_pass: str = Form(""), company_name: str = Form(""), bkash_number: str = Form(""), new_admin_password: str = Form("")):
+    if not is_authenticated(request): return RedirectResponse(url="/login")
+    for k, v in [("router_driver", router_driver), ("mikrotik_host", mikrotik_host.strip()), ("mikrotik_port", mikrotik_port.strip()), ("mikrotik_user", mikrotik_user.strip()), ("block_mode", block_mode), ("olt_driver", olt_driver), ("olt_url", olt_url.strip()), ("olt_user", olt_user.strip()), ("company_name", company_name.strip()), ("bkash_number", bkash_number.strip())]:
         database.set_setting(k, v)
-
-    if mikrotik_pass.strip():
-        database.set_setting("mikrotik_pass", mikrotik_pass.strip())
-    if olt_pass.strip():
-        database.set_setting("olt_pass", olt_pass.strip())
+    if mikrotik_pass.strip(): database.set_setting("mikrotik_pass", mikrotik_pass.strip())
+    if olt_pass.strip(): database.set_setting("olt_pass", olt_pass.strip())
     if new_admin_password.strip():
         database.set_setting("admin_password", new_admin_password.strip())
         token = _get_serializer().dumps({"auth": True, "ph": _pass_hash(new_admin_password.strip())})
         resp = RedirectResponse(url="/admin/settings?msg=Settings+ও+নতুন+পাসওয়ার্ড+সেভ+হয়েছে!", status_code=303)
         resp.set_cookie(key=COOKIE_NAME, value=token, max_age=86400 * 30, httponly=True, samesite="lax")
         return resp
-
     return RedirectResponse(url="/admin/settings?msg=সব+Settings+সফলভাবে+সেভ+হয়েছে!", status_code=303)
 
 
 @app.get("/api/test-mikrotik")
 async def api_test_mikrotik(request: Request):
-    if not is_authenticated(request):
-        return JSONResponse({"ok": False, "error": "Unauthorized"}, status_code=401)
+    if not is_authenticated(request): return JSONResponse({"ok": False, "error": "Unauthorized"}, status_code=401)
     try:
-        api = get_mikrotik_conn()
-        res = api.test_connection()
-        api.close()
-        return res
+        api = get_mikrotik_conn(); res = api.test_connection(); api.close(); return res
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
 
 @app.get("/api/test-olt")
 async def api_test_olt(request: Request):
-    if not is_authenticated(request):
-        return JSONResponse({"ok": False, "error": "Unauthorized"}, status_code=401)
+    if not is_authenticated(request): return JSONResponse({"ok": False, "error": "Unauthorized"}, status_code=401)
     try:
-        olt = get_olt_conn()
-        info = olt.get_system_info()
+        info = get_olt_conn().get_system_info()
         return {"ok": True, "name": info.get("System Name", "OLT"), "model": info.get("Device Model", "")}
     except Exception as e:
         return {"ok": False, "error": str(e)}
@@ -1270,20 +857,15 @@ async def api_test_olt(request: Request):
 
 @app.get("/admin/backup/download")
 async def download_backup(request: Request):
-    if not is_authenticated(request):
-        return RedirectResponse(url="/login")
-    content = database.export_backup_json()
-    fname = f"isp_backup_{datetime.date.today().isoformat()}.json"
-    return Response(content=content, media_type="application/json", headers={"Content-Disposition": f"attachment; filename={fname}"})
+    if not is_authenticated(request): return RedirectResponse(url="/login")
+    return Response(content=database.export_backup_json(), media_type="application/json", headers={"Content-Disposition": f"attachment; filename=isp_backup_{datetime.date.today().isoformat()}.json"})
 
 
 @app.post("/admin/backup/restore")
 async def restore_backup(request: Request, backup_file: UploadFile = File(...)):
-    if not is_authenticated(request):
-        return RedirectResponse(url="/login")
+    if not is_authenticated(request): return RedirectResponse(url="/login")
     try:
-        raw = (await backup_file.read()).decode("utf-8")
-        res = database.import_backup_json(raw)
-        return RedirectResponse(url=f"/admin/settings?msg=রিস্টোর+সফল!+{res['customers']}+গ্রাহক+ও+{res['payments']}+পেমেন্ট+পাওয়া+গেছে।", status_code=303)
+        res = database.import_backup_json((await backup_file.read()).decode("utf-8"))
+        return RedirectResponse(url=f"/admin/settings?msg=রিস্টোর+সফল!+{res['customers']}+গ্রাহক+ও+{res['payments']}+পেমেন্ট।", status_code=303)
     except Exception as e:
         return RedirectResponse(url=f"/admin/settings?msg=রিস্টোর+ব্যর্থ:+{e}", status_code=303)
