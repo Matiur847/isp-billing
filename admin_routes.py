@@ -216,7 +216,21 @@ def admin_dashboard(request: Request, background_tasks: BackgroundTasks, edit_id
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 <script>
-function filterCustomerCards(){{const q=document.getElementById("custSearchInput").value.toLowerCase();document.querySelectorAll(".customer-card").forEach(c=>c.style.display=c.getAttribute("data-search").includes(q)?"":"none");}}
+let curCardFilter="all";
+function setCardFilter(f){{
+    curCardFilter=f;
+    document.querySelectorAll(".filter-pill").forEach(b=>b.classList.toggle("active",b.dataset.filter===f));
+    filterCustomerCards();
+}}
+function filterCustomerCards(){{
+    const q=document.getElementById("custSearchInput").value.toLowerCase();
+    document.querySelectorAll(".customer-card").forEach(c=>{{
+        const okQ=c.getAttribute("data-search").includes(q);
+        const st=c.getAttribute("data-status"), on=c.getAttribute("data-online");
+        const okF=(curCardFilter==="all")||(curCardFilter==="active"&&st==="active")||(curCardFilter==="expired"&&st==="expired")||(curCardFilter==="online"&&on==="online")||(curCardFilter==="offline"&&on==="offline");
+        c.style.display=(okQ&&okF)?"":"none";
+    }});
+}}
 let actionModalInstance=null;
 function openActionDrawer(btn){{
     const d=btn.dataset;
