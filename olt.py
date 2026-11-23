@@ -8,6 +8,13 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 logger = logging.getLogger("olt")
 
 
+def normalize_mac(mac: str) -> str:
+    cleaned = re.sub(r'[^0-9a-fA-F]', '', mac or "").upper()
+    if len(cleaned) == 12:
+        return ":".join(cleaned[i:i + 2] for i in range(0, 12, 2))
+    return (mac or "").strip().upper()
+
+
 class BaseOLT:
     def __init__(self, base_url: str, user: str = "admin", password: str = ""):
         self.base_url = self._normalize_url(base_url)
@@ -95,8 +102,8 @@ class VsolGponWebOLT(BaseOLT):
         return m.group(1) if m else profile_name.strip()
 
     @staticmethod
-    def _parse_onu_table(html: str):
-        soup = BeautifulSoup(html, "html.parser")
+    def _parse_onu_table(html_text: str):
+        soup = BeautifulSoup(html_text, "html.parser")
         pon_ports = []
         sel = soup.find("select", {"name": "select"})
         if sel:
@@ -130,12 +137,13 @@ class VsolGponWebOLT(BaseOLT):
                 "line_profile": "N/A",
                 "service_profile": "N/A",
                 "vlan": "N/A",
+                "macs": [],
             })
         return pon_ports, onus
 
     @staticmethod
-    def _parse_bind_table(html: str, default_pon_id: int):
-        soup = BeautifulSoup(html, "html.parser")
+    def _parse_bind_table(html_text: str, default_pon_id: int):
+        soup = BeautifulSoup(html_text, "html.parser")
         bindings = {}
         for tr in soup.find_all("tr"):
             tds = tr.find_all("td")
@@ -145,13 +153,32 @@ class VsolGponWebOLT(BaseOLT):
             if not first_col.isdigit():
                 continue
             onu_id = int(first_col)
-            line_prof = tds[2].get_text(strip=True)
-            srv_prof = tds[3].get_text(strip=True)
             bindings[(int(default_pon_id), onu_id)] = {
-                "line_profile": line_prof,
-                "service_profile": srv_prof,
+                "line_profile": tds[2].get_text(strip=True),
+                "service_profile": tds[3].get_text(strip=True),
             }
         return bindings
+
+    @staticmethod
+    def _parse_pon_mac_table(html_text: str) -> dict:
+        soup = BeautifulSoup(html_text, "html.parser")
+        pon_macs = {}
+        for tr in soup.find_all("tr"):
+            tds = tr.find_all("td")
+            if len(tds) < 5:
+                continue
+            mac_raw = tds[2].get_text(strip=True)
+            pon_onu = tds[4].get_text(strip=True)
+            m = re.match(r'^(\d+):(\d+)$', pon_onu)
+            if not m:
+                continue
+            key = (int(m.group(1)), int(m.group(2)))
+            mac = normalize_mac(mac_raw)
+            if mac:
+                pon_macs.setdefault(key, [])
+                if mac not in pon_macs[key]:
+                    pon_macs[key].append(mac)
+        return pon_macs
 
     def _get_available_profiles(self, sample_pon: int = 1, sample_onu: int = 1):
         line_profiles, srv_profiles = [], []
@@ -208,7 +235,6 @@ class VsolGponWebOLT(BaseOLT):
                     _, pon_onus = self._parse_onu_table(r_pon.text)
                     all_onus.extend(pon_onus)
 
-                # একই সেশনে onuprofilebind.html থেকে বর্তমান Line/Service Profile ও VLAN আনা
                 try:
                     r_bind = self.session.post(
                         f"{self.base_url}/action/onuprofilebind.html",
@@ -219,12 +245,20 @@ class VsolGponWebOLT(BaseOLT):
                 except Exception as e:
                     logger.warning(f"Profile bind fetch failed for PON {pid}: {e}")
 
+            pon_macs = {}
+            try:
+                r_mac = self.session.get(f"{self.base_url}/action/macinfoPon.html", timeout=15)
+                pon_macs = self._parse_pon_mac_table(r_mac.text)
+            except Exception as e:
+                logger.warning(f"PON MAC table fetch failed: {e}")
+
             for o in all_onus:
                 b = all_bindings.get((o["pon_id"], o["onu_id"]))
                 if b:
                     o["line_profile"] = b["line_profile"]
                     o["service_profile"] = b["service_profile"]
                     o["vlan"] = self._extract_vlan_num(b["line_profile"])
+                o["macs"] = pon_macs.get((o["pon_id"], o["onu_id"]), [])
 
             sample_pon = target_pons[0] if target_pons else 1
             sample_onu = all_onus[0]["onu_id"] if all_onus else 1
