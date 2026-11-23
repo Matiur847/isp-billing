@@ -181,15 +181,18 @@ def calculate_expiry_label(expiry_str: str, status_str: str):
     except Exception:
         return "Expired", "bg-danger text-white", "Suspended", "bg-warning-subtle text-warning-emphasis border border-warning-subtle"
 
-    if status_str != "active" or exp_dt < now:
+    if exp_dt < now:
         diff = now - exp_dt
         days, hours = max(0, diff.days), diff.seconds // 3600
         label = f"Expired {days} দিন" if days > 0 else f"Expired {hours} ঘণ্টা"
-        return label, "bg-danger-subtle text-danger border border-danger-subtle", "Suspended", "bg-warning-subtle text-warning-emphasis border border-warning-subtle"
+        return label, "bg-danger-subtle text-danger border border-danger-subtle", "Expired", "bg-danger-subtle text-danger border border-danger-subtle"
+
     diff = exp_dt - now
     days, hours = diff.days, diff.seconds // 3600
-    label = f"{days} দিন left" if days > 0 else f"{hours} ঘণ্টা left"
-    return label, "bg-success-subtle text-success border border-success-subtle", "Active", "bg-success-subtle text-success border border-success-subtle"
+    rem_label = f"{days} দিন left" if days > 0 else f"{hours} ঘণ্টা left"
+    if status_str != "active":
+        return f"Off ({rem_label})", "bg-warning-subtle text-warning-emphasis border border-warning-subtle", "Manual Off", "bg-danger text-white"
+    return rem_label, "bg-success-subtle text-success border border-success-subtle", "Active", "bg-success-subtle text-success border border-success-subtle"
 
 
 def pass_hash(pwd: str) -> str:
