@@ -4,12 +4,15 @@ import os
 import re
 import json
 import secrets
+import threading
 
 try:
     import psycopg2
     from psycopg2.extras import RealDictCursor
+    from psycopg2.pool import ThreadedConnectionPool
 except ImportError:
     psycopg2 = None
+    ThreadedConnectionPool = None
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 if DATABASE_URL.startswith("postgres://"):
@@ -20,12 +23,82 @@ DB_PATH = os.environ.get("DB_PATH", "billing.db")
 
 INTEGRITY_ERRORS = (sqlite3.IntegrityError,) + ((psycopg2.IntegrityError,) if psycopg2 else ())
 
+_pg_pool = None
+_pool_lock = threading.Lock()
+_settings_cache = {}
+_settings_lock = threading.Lock()
+
+
+class _PooledConn:
+    def __init__(self, pool, conn):
+        self._pool = pool
+        self._conn = conn
+        self._closed = False
+
+    def cursor(self, *args, **kwargs):
+        return self._conn.cursor(*args, **kwargs)
+
+    def commit(self):
+        return self._conn.commit()
+
+    def rollback(self):
+        return self._conn.rollback()
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        discard = False
+        try:
+            if not self._conn.closed:
+                self._conn.rollback()
+        except Exception:
+            discard = True
+        try:
+            if self._pool:
+                self._pool.putconn(self._conn, close=discard)
+            else:
+                self._conn.close()
+        except Exception:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+
+
+def _get_pg_pool():
+    global _pg_pool
+    if _pg_pool is None:
+        with _pool_lock:
+            if _pg_pool is None:
+                _pg_pool = ThreadedConnectionPool(
+                    1, 6, DATABASE_URL, cursor_factory=RealDictCursor, connect_timeout=10
+                )
+    return _pg_pool
+
 
 def get_db():
     if IS_POSTGRES:
-        conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
-        return conn
-    conn = sqlite3.connect(DB_PATH)
+        pool = _get_pg_pool()
+        for _ in range(2):
+            conn = pool.getconn()
+            try:
+                if conn.closed:
+                    pool.putconn(conn, close=True)
+                    continue
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1")
+                conn.rollback()
+                return _PooledConn(pool, conn)
+            except Exception:
+                try:
+                    pool.putconn(conn, close=True)
+                except Exception:
+                    pass
+        conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor, connect_timeout=10)
+        return _PooledConn(None, conn)
+
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -53,6 +126,18 @@ def clean_friendly_name(username: str) -> str:
         clean = re.sub(r'\d+$', '', u)
         clean = clean.replace("-", " ").replace("_", " ")
     return clean.strip().capitalize() or username
+
+
+def _reload_settings_cache():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT key, value FROM settings")
+    rows = _fetchall_dicts(cur)
+    conn.close()
+    with _settings_lock:
+        _settings_cache.clear()
+        for r in rows:
+            _settings_cache[r["key"]] = r["value"]
 
 
 def init_db():
@@ -182,15 +267,18 @@ def init_db():
 
     conn.commit()
     conn.close()
+    _reload_settings_cache()
 
 
 def get_setting(key: str, default: str = "") -> str:
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute(_q("SELECT value FROM settings WHERE key = ?"), (key,))
-    row = _fetchone_dict(cur)
-    conn.close()
-    return row["value"] if row and row["value"] is not None else default
+    if not _settings_cache:
+        try:
+            _reload_settings_cache()
+        except Exception:
+            pass
+    with _settings_lock:
+        val = _settings_cache.get(key)
+    return val if val is not None else default
 
 
 def set_setting(key: str, value: str):
@@ -202,15 +290,18 @@ def set_setting(key: str, value: str):
     )
     conn.commit()
     conn.close()
+    with _settings_lock:
+        _settings_cache[key] = str(value)
 
 
 def get_all_settings() -> dict:
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT key, value FROM settings")
-    rows = _fetchall_dicts(cur)
-    conn.close()
-    return {r["key"]: r["value"] for r in rows}
+    if not _settings_cache:
+        try:
+            _reload_settings_cache()
+        except Exception:
+            pass
+    with _settings_lock:
+        return dict(_settings_cache)
 
 
 def record_payment(trx_id, amount, sender_phone, raw_sms):
@@ -349,7 +440,6 @@ def create_customer(username, password, name, phone, package_name, package_price
 
 
 def upsert_synced_secrets(secrets_list):
-    """MikroTik থেকে সব PPPoE ইউজার Import করে (আগে থাকলে ডুপ্লিকেট করে না)"""
     conn = get_db()
     cur = conn.cursor()
     now = datetime.datetime.now()
@@ -365,7 +455,7 @@ def upsert_synced_secrets(secrets_list):
             continue
         pwd = s.get("password", "123456")
         prof = s.get("profile", "default")
-        mac = s.get("caller_id", "")
+        mac = s.get("caller_id", "") or s.get("last_caller_id", "")
         status = "expired" if s.get("disabled") else "active"
         friendly = clean_friendly_name(uname)
         cur.execute(
@@ -518,29 +608,32 @@ def get_stats():
     conn = get_db()
     cur = conn.cursor()
 
-    cur.execute("SELECT COUNT(*) AS cnt FROM customers")
-    total_cust = list(cur.fetchone().values())[0] if IS_POSTGRES else cur.fetchone()[0]
-
-    cur.execute("SELECT COUNT(*) AS cnt FROM customers WHERE status = 'active'")
-    active_cust = list(cur.fetchone().values())[0] if IS_POSTGRES else cur.fetchone()[0]
-
-    cur.execute("SELECT COUNT(*) AS cnt FROM customers WHERE status = 'expired'")
-    expired_cust = list(cur.fetchone().values())[0] if IS_POSTGRES else cur.fetchone()[0]
-
-    cur.execute("SELECT COALESCE(SUM(amount), 0) AS s FROM payments WHERE status = 'used'")
-    total_revenue = list(cur.fetchone().values())[0] if IS_POSTGRES else cur.fetchone()[0]
+    cur.execute("""
+        SELECT COUNT(*) AS total,
+               COALESCE(SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END), 0) AS active,
+               COALESCE(SUM(CASE WHEN status = 'expired' THEN 1 ELSE 0 END), 0) AS expired
+        FROM customers
+    """)
+    crow = _fetchone_dict(cur) or {}
 
     today_str = datetime.date.today().isoformat()
-    cur.execute(_q("SELECT COALESCE(SUM(amount), 0) AS s FROM payments WHERE status = 'used' AND used_at LIKE ?"), (f"{today_str}%",))
-    today_revenue = list(cur.fetchone().values())[0] if IS_POSTGRES else cur.fetchone()[0]
-
+    cur.execute(
+        _q("""
+        SELECT COALESCE(SUM(amount), 0) AS total_rev,
+               COALESCE(SUM(CASE WHEN used_at LIKE ? THEN amount ELSE 0 END), 0) AS today_rev
+        FROM payments WHERE status = 'used'
+        """),
+        (f"{today_str}%",)
+    )
+    prow = _fetchone_dict(cur) or {}
     conn.close()
+
     return {
-        "total": int(total_cust or 0),
-        "active": int(active_cust or 0),
-        "expired": int(expired_cust or 0),
-        "total_revenue": round(float(total_revenue or 0), 2),
-        "today_revenue": round(float(today_revenue or 0), 2),
+        "total": int(crow.get("total") or 0),
+        "active": int(crow.get("active") or 0),
+        "expired": int(crow.get("expired") or 0),
+        "total_revenue": round(float(prow.get("total_rev") or 0), 2),
+        "today_revenue": round(float(prow.get("today_rev") or 0), 2),
     }
 
 
@@ -566,8 +659,7 @@ def import_backup_json(json_text: str) -> dict:
     data = json.loads(json_text)
     conn = get_db()
     cur = conn.cursor()
-    c_count = 0
-    p_count = 0
+    c_count, p_count = 0, 0
 
     for c in data.get("customers", []):
         cur.execute(
