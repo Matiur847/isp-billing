@@ -13,7 +13,7 @@ from itsdangerous import URLSafeSerializer, BadSignature
 
 import database
 from mikrotik import get_router_driver, ROUTER_DRIVERS
-from olt import get_olt_driver, OLT_DRIVERS
+from olt import get_olt_driver, OLT_DRIVERS, normalize_mac
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("billing_app")
@@ -79,6 +79,14 @@ def enforce_expired_active_users(expired_ips: list):
         api.close()
     except Exception as e:
         logger.error(f"Enforce expired failed: {e}")
+
+
+def save_auto_links_task(links: list):
+    for cust_id, pon_id, onu_id, onu_sn in links:
+        try:
+            database.link_customer_onu(cust_id, pon_id, onu_id, onu_sn)
+        except Exception as e:
+            logger.error(f"Auto link failed for cust {cust_id}: {e}")
 
 
 def sync_secret_to_mikrotik(username, password, profile="default"):
@@ -278,10 +286,10 @@ async def customer_portal(query: Optional[str] = None, user_id: Optional[int] = 
     if query and not search_results and not selected_customer:
         body_content = '<div class="alert alert-danger">❌ এই নাম বা আইডিতে কোনো গ্রাহক পাওয়া যায়নি! সঠিক নাম বা ইউজার আইডি লিখুন।</div>'
     elif len(search_results) > 1 and not selected_customer:
-        items = "".join(
-            f'<a href="/?user_id={c["id"]}" class="list-group-item list-group-item-action d-flex justify-content-between align-items-center p-3"><div><h6 class="mb-1 fw-bold text-primary">{h(c["name"] or c["username"])}</h6><small class="text-muted">আইডি: {h(c["username"])} | মোবাইল: {h(c["phone"] or "নাই")}</small></div><span class="badge bg-primary rounded-pill">পেমেন্ট ➔</span></a>'
-            for c in search_results
-        )
+        items = ""
+        for c in search_results:
+            ph_txt = h(c["phone"] or "নাই")
+            items += f'<a href="/?user_id={c["id"]}" class="list-group-item list-group-item-action d-flex justify-content-between align-items-center p-3"><div><h6 class="mb-1 fw-bold text-primary">{h(c["name"] or c["username"])}</h6><small class="text-muted">আইডি: {h(c["username"])} | মোবাইল: {ph_txt}</small></div><span class="badge bg-primary rounded-pill">পেমেন্ট ➔</span></a>'
         body_content = f'<div class="alert alert-info">🔍 একাধিক গ্রাহক পাওয়া গেছে! আপনার প্রোফাইলটি সিলেক্ট করুন:</div><div class="list-group mb-4">{items}</div>'
     elif selected_customer:
         c = selected_customer
@@ -385,9 +393,11 @@ async def admin_dashboard(request: Request, background_tasks: BackgroundTasks, e
         bind_badge = '<span class="badge bg-primary-subtle text-primary border border-primary-subtle"><i class="fa-solid fa-lock"></i> Bound</span>' if c.get("mac_address") else '<span class="badge bg-light text-muted border"><i class="fa-solid fa-lock-open"></i> Unbound</span>'
         olt_pon, olt_onuid, onu_sn = int(c.get("olt_pon") or 0), int(c.get("olt_onuid") or 0), (c.get("onu_sn") or "")
         onu_badge = f'<button type="button" class="badge bg-dark text-white border-0 mt-1" onclick="openOpticalModal({olt_pon}, {olt_onuid}, \'{h(onu_sn)}\')"><i class="fa-solid fa-signal text-info me-1"></i>PON{olt_pon}:{olt_onuid} ({h(onu_sn)})</button>' if olt_pon and olt_onuid else ""
+        phone_html = h(c["phone"]) if c["phone"] else '<span class="text-muted">No Mobile</span>'
+        search_txt = h((uname + " " + (c["name"] or "") + " " + (c["phone"] or "") + " " + onu_sn + " " + mac).lower())
 
         cust_rows_html += f"""
-        <div class="card mb-2 p-2 border customer-card" data-search="{h((uname + ' ' + (c['name'] or '') + ' ' + (c['phone'] or '') + ' ' + onu_sn + ' ' + mac).lower())}">
+        <div class="card mb-2 p-2 border customer-card" data-search="{search_txt}">
             <div class="row align-items-center g-2">
                 <div class="col-12 col-md-3">
                     <div class="d-flex align-items-center flex-wrap gap-1 mb-1">{online_badge}</div>
@@ -397,7 +407,7 @@ async def admin_dashboard(request: Request, background_tasks: BackgroundTasks, e
                 </div>
                 <div class="col-12 col-md-3">
                     <div class="text-primary fw-bold small">#{c['id'] + 40500}</div>
-                    <div class="text-primary small mb-1"><i class="fa-solid fa-phone"></i> {h(c['phone']) if c['phone'] else '<span class="text-muted">No Mobile</span>'}</div>
+                    <div class="text-primary small mb-1"><i class="fa-solid fa-phone"></i> {phone_html}</div>
                     <div class="fw-bold fs-6 text-dark">{dname}</div>
                     <div class="small text-muted"><i class="fa-solid fa-user text-primary"></i> {h(uname)} &nbsp; <i class="fa-solid fa-key text-muted"></i> {h(c['password'])}</div>
                 </div>
@@ -421,17 +431,23 @@ async def admin_dashboard(request: Request, background_tasks: BackgroundTasks, e
             </div>
         </div>"""
 
-    pay_rows = pay_rows = ""
+    pay_rows = ""
     for p in payments:
         ub = '<span class="badge bg-secondary">Used</span>' if p["status"] == "used" else '<span class="badge bg-success">Unused</span>'
         pay_rows += f"<tr><td><b>{h(p['trx_id'])}</b></td><td><b class='text-success'>{p['amount']} ৳</b></td><td><small>{h(p['sender_phone'])}</small></td><td><small>{h(p['received_at'])}</small></td><td>{ub}</td><td><b>{h(p['used_by'] or '-')}</b></td></tr>"
 
     def profile_options(selected):
         opts = list(profiles) + ([selected] if selected and selected not in profiles else [])
-        return "".join(f'<option value="{h(p)}" {"selected" if p == selected else ""}>{h(p)}</option>' for p in opts)
+        res_opts = ""
+        for p in opts:
+            sel = "selected" if p == selected else ""
+            res_opts += f'<option value="{h(p)}" {sel}>{h(p)}</option>'
+        return res_opts
 
     edit_form_html = ""
     if edit_cust:
+        sel_act = "selected" if edit_cust["status"] == "active" else ""
+        sel_exp = "selected" if edit_cust["status"] == "expired" else ""
         edit_form_html = f"""
         <div class="card shadow border-primary mb-4"><div class="card-header bg-primary text-white fw-bold d-flex justify-content-between align-items-center"><span>গ্রাহক এডিট করুন: {h(edit_cust['username'])}</span><a href="/admin" class="btn btn-sm btn-light">বাতিল</a></div>
         <div class="card-body"><form method="POST" action="/admin/update-customer"><input type="hidden" name="cust_id" value="{edit_cust['id']}"><div class="row g-3">
@@ -443,7 +459,7 @@ async def admin_dashboard(request: Request, background_tasks: BackgroundTasks, e
             <div class="col-md-2"><label class="form-label fw-bold">প্যাকেজের নাম</label><input type="text" name="package_name" class="form-control" value="{h(edit_cust['package_name'])}"></div>
             <div class="col-md-2"><label class="form-label fw-bold">মাসিক বিল (৳)</label><input type="number" name="package_price" class="form-control" value="{edit_cust['package_price']}"></div>
             <div class="col-md-3"><label class="form-label fw-bold">মেয়াদ</label><input type="text" name="expiry_date" class="form-control" value="{h(edit_cust['expiry_date'])}"></div>
-            <div class="col-md-2"><label class="form-label fw-bold">স্ট্যাটাস</label><select name="status" class="form-select"><option value="active" {"selected" if edit_cust['status']=='active' else ''}>Active</option><option value="expired" {"selected" if edit_cust['status']=='expired' else ''}>Expired</option></select></div>
+            <div class="col-md-2"><label class="form-label fw-bold">স্ট্যাটাস</label><select name="status" class="form-select"><option value="active" {sel_act}>Active</option><option value="expired" {sel_exp}>Expired</option></select></div>
         </div><div class="mt-3"><button type="submit" class="btn btn-success fw-bold px-4">আপডেট করুন</button> <a href="/admin" class="btn btn-secondary">বাতিল</a></div></form></div></div>"""
 
     msg_alert = f'<div class="alert alert-info alert-dismissible fade show">{h(msg)}<button type="button" class="btn-close" data-bs-dismiss="alert"></button></div>' if msg else ""
@@ -595,19 +611,39 @@ async def sync_mikrotik_users(request: Request):
         return RedirectResponse(url=f"/admin?msg=MikroTik+সিঙ্ক+ব্যর্থ:+{e}", status_code=303)
 
 
-# --- OLT MONITOR (1-Click VLAN + Customer Name + MAC + SN) ---
+# --- OLT MONITOR (Auto-Match Customer by PON MAC + 1-Click VLAN) ---
 @app.get("/admin/olt", response_class=HTMLResponse)
-async def olt_dashboard(request: Request, pon_id: str = "2", msg: Optional[str] = None):
+async def olt_dashboard(request: Request, background_tasks: BackgroundTasks, pon_id: str = "2", msg: Optional[str] = None):
     if not is_authenticated(request):
         return RedirectResponse(url="/login")
 
     company = h(get_company_name())
     customers = database.get_all_customers()
+    cust_by_uname = {c["username"].strip().lower(): c for c in customers}
 
-    actives = {}
+    actives, secrets_list = {}, []
     try:
-        api = get_mikrotik_conn(); actives = api.get_active_pppoe(); api.close()
-    except Exception: pass
+        api = get_mikrotik_conn()
+        actives = api.get_active_pppoe()
+        secrets_list = api.get_all_secrets()
+        api.close()
+    except Exception:
+        pass
+
+    # MikroTik (Active + Secret) ও DB থেকে MAC -> Customer ম্যাপ তৈরি
+    cust_by_mac = {}
+    for c in customers:
+        if c.get("mac_address"):
+            cust_by_mac[normalize_mac(c["mac_address"])] = c
+    for s in secrets_list:
+        cid = normalize_mac(s.get("caller_id", ""))
+        uname_l = (s.get("name") or "").strip().lower()
+        if cid and uname_l in cust_by_uname:
+            cust_by_mac[cid] = cust_by_uname[uname_l]
+    for uname, act in actives.items():
+        cid = normalize_mac(act.get("caller_id", ""))
+        if cid and uname.strip().lower() in cust_by_uname:
+            cust_by_mac[cid] = cust_by_uname[uname.strip().lower()]
 
     cust_by_onu, cust_by_sn = {}, {}
     for c in customers:
@@ -623,33 +659,60 @@ async def olt_dashboard(request: Request, pon_id: str = "2", msg: Optional[str] 
     except Exception as e:
         olt_error = str(e)
 
-    pon_buttons = f'<a href="/admin/olt?pon_id=all" class="btn btn-sm {"btn-primary" if pon_id == "all" else "btn-outline-primary"} fw-bold">সব PON</a>'
+    pon_all_cls = "btn-primary" if pon_id == "all" else "btn-outline-primary"
+    pon_buttons = f'<a href="/admin/olt?pon_id=all" class="btn btn-sm {pon_all_cls} fw-bold">সব PON</a>'
     for p in olt_data["pon_ports"]:
-        pon_buttons += f' <a href="/admin/olt?pon_id={p["id"]}" class="btn btn-sm {"btn-primary" if str(p["id"])==str(pon_id) else "btn-outline-primary"} fw-bold">{h(p["name"])}</a>'
+        p_cls = "btn-primary" if str(p["id"]) == str(pon_id) else "btn-outline-primary"
+        pon_buttons += f' <a href="/admin/olt?pon_id={p["id"]}" class="btn btn-sm {p_cls} fw-bold">{h(p["name"])}</a>'
 
-    cust_options = "".join(f'<option value="{c["id"]}">{h(c["name"] or c["username"])} ({h(c["username"])}) {h(c.get("phone") or "")}</option>' for c in customers)
+    cust_options = "".join(
+        f'<option value="{c["id"]}">{h(c["name"] or c["username"])} ({h(c["username"])}) {h(c.get("phone") or "")}</option>'
+        for c in customers
+    )
     line_opts = "".join(f'<option value="{h(lp)}">{h(lp)}</option>' for lp in (olt_data.get("line_profiles") or ["line_vlan_712", "line_vlan_200", "2101", "N/A"]))
     srv_opts = "".join(f'<option value="{h(sp)}">{h(sp)}</option>' for sp in (olt_data.get("service_profiles") or ["srv_vlan712", "srv_vlan200", "2101", "N/A"]))
     presets = olt_data.get("vlan_presets") or []
 
+    auto_links_to_save = []
     rows_html = ""
     for o in olt_data["onus"]:
         st_badge = '<span class="badge bg-success">Online</span>' if o["online"] else '<span class="badge bg-danger">Offline</span>'
-        linked = cust_by_onu.get((o["pon_id"], o["onu_id"])) or cust_by_sn.get((o["sn"] or "").strip().upper())
+        db_linked = cust_by_onu.get((o["pon_id"], o["onu_id"])) or cust_by_sn.get((o["sn"] or "").strip().upper())
+        onu_macs = o.get("macs", [])
 
-        cust_search_extra = ""
-        if linked:
-            uname = linked["username"]
-            act = actives.get(uname, {})
-            cust_mac = act.get("caller_id") or linked.get("mac_address") or ""
-            cname = h(linked["name"] or uname)
-            st_pill = '<span class="badge bg-success-subtle text-success">Active</span>' if linked["status"] == "active" else '<span class="badge bg-danger-subtle text-danger">Expired</span>'
-            phone_str = f'<div class="small text-muted"><i class="fa-solid fa-phone text-primary"></i> {h(linked["phone"])}</div>' if linked.get("phone") else ""
-            mac_str = f'<div class="small text-muted"><i class="fa-solid fa-fingerprint"></i> MAC: <b>{h(cust_mac)}</b></div>' if cust_mac else ""
-            linked_html = f'<div class="fw-bold text-primary">{cname} <small class="text-dark">({h(uname)})</small> {st_pill}</div>{phone_str}{mac_str}'
-            cust_search_extra = f"{uname} {linked.get('name','')} {linked.get('phone','')} {cust_mac}"
+        matched_list = []
+        is_auto = False
+        if db_linked:
+            matched_list = [db_linked]
         else:
-            linked_html = '<span class="text-muted small">লিংক করা নেই</span>'
+            seen_ids = set()
+            for omac in onu_macs:
+                mc = cust_by_mac.get(omac)
+                if mc and mc["id"] not in seen_ids:
+                    matched_list.append(mc)
+                    seen_ids.add(mc["id"])
+                    is_auto = True
+            if len(matched_list) == 1:
+                auto_links_to_save.append((matched_list[0]["id"], o["pon_id"], o["onu_id"], o["sn"]))
+
+        cust_search_extra = " ".join(onu_macs)
+        if matched_list:
+            linked_blocks = []
+            for mc in matched_list:
+                uname = mc["username"]
+                act = actives.get(uname, {})
+                cmac = act.get("caller_id") or mc.get("mac_address") or (onu_macs[0] if onu_macs else "")
+                cname = h(mc["name"] or uname)
+                st_pill = '<span class="badge bg-success-subtle text-success">Active</span>' if mc["status"] == "active" else '<span class="badge bg-danger-subtle text-danger">Expired</span>'
+                auto_pill = '<span class="badge bg-info-subtle text-primary border border-info-subtle">Auto MAC</span>' if is_auto else ""
+                phone_str = f'<div class="small text-muted"><i class="fa-solid fa-phone text-primary"></i> {h(mc["phone"])}</div>' if mc.get("phone") else ""
+                mac_str = f'<div class="small text-muted"><i class="fa-solid fa-fingerprint"></i> MAC: <b>{h(cmac)}</b></div>' if cmac else ""
+                linked_blocks.append(f'<div class="mb-1"><div class="fw-bold text-primary">{cname} <small class="text-dark">({h(uname)})</small> {st_pill} {auto_pill}</div>{phone_str}{mac_str}</div>')
+                cust_search_extra += f" {uname} {mc.get('name','')} {mc.get('phone','')} {cmac}"
+            linked_html = "".join(linked_blocks)
+        else:
+            mac_hint = f'<div class="small text-muted mt-1"><i class="fa-solid fa-fingerprint"></i> {", ".join(h(m) for m in onu_macs)}</div>' if onu_macs else ""
+            linked_html = f'<span class="text-muted small">গ্রাহক পাওয়া যায়নি</span>{mac_hint}'
 
         cur_vlan = o.get("vlan", "N/A")
         vlan_badge = f'<span class="badge bg-primary fs-6">VLAN {h(cur_vlan)}</span>' if cur_vlan != "N/A" else '<span class="badge bg-secondary">N/A</span>'
@@ -684,6 +747,9 @@ async def olt_dashboard(request: Request, pon_id: str = "2", msg: Optional[str] 
                 <a href="/admin/olt/reboot?pon_id={o['pon_id']}&onu_id={o['onu_id']}&back_pon={h(pon_id)}" onclick="return confirm('এই ONU টি রিবুট করবেন?');" class="btn btn-sm btn-outline-danger"><i class="fa-solid fa-rotate-right"></i></a>
             </td>
         </tr>"""
+
+    if auto_links_to_save:
+        background_tasks.add_task(save_auto_links_task, auto_links_to_save)
 
     err_html = f'<div class="alert alert-danger"><b>OLT কানেকশন ত্রুটি:</b> {h(olt_error)} — <a href="/admin/settings">Settings</a> চেক করুন।</div>' if olt_error else ""
     msg_html = f'<div class="alert alert-success alert-dismissible fade show">{h(msg)}<button type="button" class="btn-close" data-bs-dismiss="alert"></button></div>' if msg else ""
@@ -780,6 +846,9 @@ async def settings_page(request: Request, msg: Optional[str] = None):
     r_opts = "".join(f'<option value="{k}" {"selected" if s.get("router_driver")==k else ""}>{k}</option>' for k in ROUTER_DRIVERS.keys())
     o_opts = "".join(f'<option value="{k}" {"selected" if s.get("olt_driver")==k else ""}>{k}</option>' for k in OLT_DRIVERS.keys())
     bm = s.get("block_mode", "address_list")
+    bm_al = "selected" if bm == "address_list" else ""
+    bm_ds = "selected" if bm == "disable_secret" else ""
+    bm_bo = "selected" if bm == "both" else ""
     db_status = '<span class="badge bg-success fs-6">PostgreSQL চালু আছে (ডেটা স্থায়ী থাকবে ✅)</span>' if database.IS_POSTGRES else '<span class="badge bg-warning text-dark fs-6">SQLite চলছে (Render-এ স্থায়ী করতে DATABASE_URL দিন ⚠️)</span>'
     msg_html = f'<div class="alert alert-success alert-dismissible fade show">{h(msg)}<button type="button" class="btn-close" data-bs-dismiss="alert"></button></div>' if msg else ""
 
@@ -797,7 +866,7 @@ async def settings_page(request: Request, msg: Optional[str] = None):
             <div class="mb-2"><label class="form-label fw-bold">API Port</label><input type="text" name="mikrotik_port" class="form-control" value="{h(s.get('mikrotik_port','8728'))}"></div>
             <div class="mb-2"><label class="form-label fw-bold">Username</label><input type="text" name="mikrotik_user" class="form-control" value="{h(s.get('mikrotik_user','admin'))}"></div>
             <div class="mb-2"><label class="form-label fw-bold">Password (না বদলালে ফাঁকা রাখুন)</label><input type="password" name="mikrotik_pass" class="form-control" placeholder="••••••••"></div>
-            <div class="mb-3"><label class="form-label fw-bold">ব্লকিং পদ্ধতি</label><select name="block_mode" class="form-select"><option value="address_list" {"selected" if bm=='address_list' else ''}>Expired-Users Address List</option><option value="disable_secret" {"selected" if bm=='disable_secret' else ''}>Disable PPPoE Secret</option><option value="both" {"selected" if bm=='both' else ''}>উভয়ই</option></select></div>
+            <div class="mb-3"><label class="form-label fw-bold">ব্লকিং পদ্ধতি</label><select name="block_mode" class="form-select"><option value="address_list" {bm_al}>Expired-Users Address List</option><option value="disable_secret" {bm_ds}>Disable PPPoE Secret</option><option value="both" {bm_bo}>উভয়ই</option></select></div>
             <button type="button" class="btn btn-outline-primary btn-sm fw-bold" onclick="testConn('/api/test-mikrotik','mkTestRes')">MikroTik টেস্ট করুন</button><div id="mkTestRes" class="mt-2 small"></div>
         </div></div></div>
         <div class="col-md-6"><div class="card border-0 shadow-sm h-100"><div class="card-header bg-dark text-white fw-bold">OLT ও সাধারণ সেটিংস</div><div class="card-body">
