@@ -636,10 +636,13 @@ async def olt_dashboard(request: Request, background_tasks: BackgroundTasks, pon
         if c.get("mac_address"):
             cust_by_mac[normalize_mac(c["mac_address"])] = c
     for s in secrets_list:
-        cid = normalize_mac(s.get("caller_id", ""))
         uname_l = (s.get("name") or "").strip().lower()
-        if cid and uname_l in cust_by_uname:
-            cust_by_mac[cid] = cust_by_uname[uname_l]
+        if uname_l not in cust_by_uname:
+            continue
+        for raw_mac in (s.get("caller_id", ""), s.get("last_caller_id", "")):
+            cid = normalize_mac(raw_mac)
+            if cid:
+                cust_by_mac[cid] = cust_by_uname[uname_l]
     for uname, act in actives.items():
         cid = normalize_mac(act.get("caller_id", ""))
         if cid and uname.strip().lower() in cust_by_uname:
