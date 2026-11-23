@@ -1,8 +1,10 @@
 import os
 import re
+import hmac
 import time
 import html
 import hashlib
+import secrets
 import datetime
 import logging
 from typing import Optional
@@ -21,9 +23,8 @@ logger = logging.getLogger("billing_app")
 
 COOKIE_NAME = "admin_session"
 
-# ইন-মেমোরি স্মার্ট ক্যাশ (সাইট ফাস্ট রাখার জন্য)
 _PROFILES_CACHE = {"ts": 0.0, "data": ["default", "Profile-Line2", "Profile-Line3"]}
-_OLT_CACHE = {}  # key: pon_id -> {"ts": float, "data": dict}
+_OLT_CACHE = {}
 
 
 def _clear_caches():
@@ -37,6 +38,14 @@ def h(val) -> str:
 
 def get_company_name() -> str:
     return database.get_setting("company_name", "সাইফুল ডিস এন্ড ইন্টারনেট 🛜")
+
+
+def get_webhook_secret() -> str:
+    sec = database.get_setting("webhook_secret", "").strip()
+    if not sec:
+        sec = secrets.token_urlsafe(20)
+        database.set_setting("webhook_secret", sec)
+    return sec
 
 
 def get_mikrotik_conn():
@@ -195,6 +204,7 @@ def calculate_expiry_label(expiry_str: str, status_str: str):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     database.init_db()
+    get_webhook_secret()
     logger.info(f"Database initialized (PostgreSQL={database.IS_POSTGRES}).")
     yield
 
@@ -267,6 +277,12 @@ def api_live_speed(username: str):
 
 @app.post("/api/sms-webhook")
 async def sms_webhook(request: Request):
+    provided = (request.query_params.get("key") or request.headers.get("x-webhook-secret") or "").strip()
+    expected = get_webhook_secret()
+    if not provided or not hmac.compare_digest(provided, expected):
+        logger.warning("Blocked unauthorized /api/sms-webhook request")
+        return JSONResponse({"status": "error", "message": "Unauthorized: Invalid or missing webhook key"}, status_code=403)
+
     try:
         body = await request.json()
         text = (body.get("content") or body.get("msg") or body.get("message") or body.get("text") or body.get("body") or str(body)) if isinstance(body, dict) else str(body)
@@ -498,7 +514,8 @@ def admin_dashboard(request: Request, background_tasks: BackgroundTasks, edit_id
     pay_rows = ""
     for p in payments:
         ub = '<span class="badge bg-secondary">Used</span>' if p["status"] == "used" else '<span class="badge bg-success">Unused</span>'
-        pay_rows += f"<tr><td><b>{h(p['trx_id'])}</b></td><td><b class='text-success'>{p['amount']} ৳</b></td><td><small>{h(p['sender_phone'])}</small></td><td><small>{h(p['received_at'])}</small></td><td>{ub}</td><td><b>{h(p['used_by'] or '-')}</b></td></tr>"
+        del_btn = f'<a href="/admin/delete-payment/{p["id"]}" onclick="return confirm(\'এই পেমেন্ট রেকর্ডটি মুছে ফেলবেন?\');" class="btn btn-sm btn-outline-danger py-0 px-2"><i class="fa-solid fa-trash"></i></a>'
+        pay_rows += f"<tr><td><b>{h(p['trx_id'])}</b></td><td><b class='text-success'>{p['amount']} ৳</b></td><td><small>{h(p['sender_phone'])}</small></td><td><small>{h(p['received_at'])}</small></td><td>{ub}</td><td><b>{h(p['used_by'] or '-')}</b></td><td>{del_btn}</td></tr>"
 
     def profile_options(selected):
         opts = list(profiles) + ([selected] if selected and selected not in profiles else [])
@@ -552,7 +569,7 @@ def admin_dashboard(request: Request, background_tasks: BackgroundTasks, edit_id
     {edit_form_html}
     <div class="card p-3 mb-3 bg-white border-0 shadow-sm"><div class="row align-items-center g-2"><div class="col-md-6"><input type="text" id="custSearchInput" class="form-control" placeholder="গ্রাহকের নাম, ইউজার আইডি, মোবাইল, MAC বা ONU SN দিয়ে খুঁজুন..." onkeyup="filterCustomerCards()"></div><div class="col-md-6 text-md-end text-muted small">মোট: <b>{len(customers)} জন</b> | অনলাইন: <b>{len(actives)} জন</b></div></div></div>
     <div id="customerCardsContainer">{cust_rows_html or '<div class="alert alert-light text-center">কোনো গ্রাহক নেই।</div>'}</div>
-    <div class="card shadow-sm mt-4"><div class="card-header bg-white py-3"><h5 class="fw-bold mb-0"><i class="fa-solid fa-receipt me-2 text-danger"></i>সাম্প্রতিক বিকাশ পেমেন্ট হিস্ট্রি</h5></div><div class="card-body p-0 table-responsive"><table class="table table-sm table-hover align-middle mb-0"><thead class="table-light"><tr><th>TrxID</th><th>টাকা</th><th>নম্বর</th><th>সময়</th><th>স্ট্যাটাস</th><th>ইউজার</th></tr></thead><tbody>{pay_rows}</tbody></table></div></div>
+    <div class="card shadow-sm mt-4"><div class="card-header bg-white py-3"><h5 class="fw-bold mb-0"><i class="fa-solid fa-receipt me-2 text-danger"></i>সাম্প্রতিক বিকাশ পেমেন্ট হিস্ট্রি</h5></div><div class="card-body p-0 table-responsive"><table class="table table-sm table-hover align-middle mb-0"><thead class="table-light"><tr><th>TrxID</th><th>টাকা</th><th>নম্বর</th><th>সময়</th><th>স্ট্যাটাস</th><th>ইউজার</th><th></th></tr></thead><tbody>{pay_rows}</tbody></table></div></div>
 </div>
 
 <div class="modal fade" id="actionModal" tabindex="-1"><div class="modal-dialog modal-dialog-centered"><div class="modal-content border-0 shadow"><div class="modal-header border-bottom"><h5 class="modal-title fw-bold" id="actionModalTitle">Actions</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body p-4"><div class="row g-2" id="actionButtonsGrid"></div></div></div></div></div>
@@ -701,6 +718,18 @@ async function openOpticalModal(pon,onuid,sn){{
     b.innerHTML=`<div class="mb-2"><b>ONU:</b> GPON0/${{pon}}:${{onuid}} ${{sn?'('+sn+')':''}} ${{sb}}</div><table class="table table-bordered table-sm mb-0"><tr><th>Rx Power</th><td class="fw-bold text-primary">${{d.rx_power}}</td></tr><tr><th>Tx Power</th><td>${{d.tx_power}}</td></tr><tr><th>Distance</th><td>${{d.distance}}</td></tr><tr><th>Temperature</th><td>${{d.temperature}}</td></tr><tr><th>Voltage / Bias</th><td>${{d.voltage}} / ${{d.bias_current}}</td></tr></table>`;}}catch(e){{b.innerHTML=`<div class="alert alert-danger">${{e}}</div>`;}}
 }}
 </script></body></html>"""
+
+
+@app.get("/admin/delete-payment/{pay_id}")
+def delete_payment_action(request: Request, pay_id: int):
+    if not is_authenticated(request):
+        return RedirectResponse(url="/login")
+    conn = database.get_db()
+    cur = conn.cursor()
+    cur.execute(database._q("DELETE FROM payments WHERE id = ?"), (int(pay_id),))
+    conn.commit()
+    conn.close()
+    return RedirectResponse(url="/admin?msg=পেমেন্ট+রেকর্ড+মুছে+ফেলা+হয়েছে!", status_code=303)
 
 
 @app.post("/admin/create-customer")
@@ -1015,13 +1044,18 @@ def olt_reboot_onu(request: Request, pon_id: int, onu_id: int, back_pon: str = "
         return RedirectResponse(url=f"/admin/olt?pon_id={back_pon}&msg=Reboot+ব্যর্থ:+{e}", status_code=303)
 
 
-# --- SETTINGS & BACKUP ---
+# --- SETTINGS, WEBHOOK SECURITY, DUMMY TEST & BACKUP ---
 @app.get("/admin/settings", response_class=HTMLResponse)
 def settings_page(request: Request, msg: Optional[str] = None):
     if not is_authenticated(request):
         return RedirectResponse(url="/login")
     s = database.get_all_settings()
     company = h(s.get("company_name", "সাইফুল ডিস এন্ড ইন্টারনেট 🛜"))
+    wh_secret = get_webhook_secret()
+    proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+    host_hdr = request.headers.get("host", request.url.netloc)
+    wh_url = f"{proto}://{host_hdr}/api/sms-webhook?key={wh_secret}"
+
     r_opts = "".join(f'<option value="{k}" {"selected" if s.get("router_driver")==k else ""}>{k}</option>' for k in ROUTER_DRIVERS.keys())
     o_opts = "".join(f'<option value="{k}" {"selected" if s.get("olt_driver")==k else ""}>{k}</option>' for k in OLT_DRIVERS.keys())
     bm = s.get("block_mode", "address_list")
@@ -1057,8 +1091,26 @@ def settings_page(request: Request, msg: Optional[str] = None):
             <div class="mb-2"><label class="form-label fw-bold">ISP নাম</label><input type="text" name="company_name" class="form-control" value="{company}"></div>
             <div class="mb-2"><label class="form-label fw-bold">বিকাশ নম্বর</label><input type="text" name="bkash_number" class="form-control" value="{h(s.get('bkash_number',''))}"></div>
             <div class="mb-2"><label class="form-label fw-bold">নতুন অ্যাডমিন পাসওয়ার্ড</label><input type="password" name="new_admin_password" class="form-control" placeholder="••••••••"></div>
+            <div class="mb-2"><label class="form-label fw-bold text-danger">SMS Webhook Secret Key (গোপন রাখুন)</label><input type="text" name="webhook_secret" class="form-control" value="{h(wh_secret)}"></div>
         </div></div></div>
     </div><div class="text-end mt-3"><button type="submit" class="btn btn-success btn-lg fw-bold px-5">সব Settings সেভ করুন</button></div></form>
+
+    <div class="card border-0 shadow-sm mt-4 p-4">
+        <h5 class="fw-bold mb-2"><i class="fa-solid fa-shield-halved text-success me-2"></i>নিরাপদ bKash SMS Webhook (শুধু আপনার ফোনের জন্য)</h5>
+        <p class="small text-muted mb-2">গোপন Key ছাড়া বাইরে থেকে কেউ আর ডামি পেমেন্ট পাঠাতে পারবে না। আপনার ফোনের <b>SMS Forwarder</b> অ্যাপে নিচের পুরো URL-টি বসান:</p>
+        <div class="input-group mb-3">
+            <input type="text" id="whUrlBox" class="form-control bg-light" value="{h(wh_url)}" readonly>
+            <button type="button" class="btn btn-primary fw-bold" onclick="navigator.clipboard.writeText(document.getElementById('whUrlBox').value);alert('Webhook URL কপি হয়েছে!');">Copy URL</button>
+        </div>
+        <hr>
+        <h6 class="fw-bold mb-2"><i class="fa-solid fa-flask text-warning me-2"></i>ডামি পেমেন্ট টেস্ট (শুধু অ্যাডমিনের জন্য)</h6>
+        <form method="POST" action="/admin/test-dummy-sms" class="row g-2 align-items-end">
+            <div class="col-md-4"><label class="form-label small fw-bold">টেস্ট TrxID</label><input type="text" name="trx_id" class="form-control" value="TEST998877" required></div>
+            <div class="col-md-4"><label class="form-label small fw-bold">টাকার পরিমাণ</label><input type="number" name="amount" class="form-control" value="525" required></div>
+            <div class="col-md-4"><button type="submit" class="btn btn-warning fw-bold w-100">ডামি SMS জমা করুন</button></div>
+        </form>
+    </div>
+
     <div class="card border-0 shadow-sm mt-4 p-4"><div class="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-2"><h5 class="fw-bold mb-0">ডাটাবেস ও ব্যাকআপ</h5>{db_status}</div>
     <div class="row g-3 align-items-center"><div class="col-md-5"><a href="/admin/backup/download" class="btn btn-outline-primary fw-bold w-100">ব্যাকআপ ডাউনলোড (.JSON)</a></div>
     <div class="col-md-7"><form method="POST" action="/admin/backup/restore" enctype="multipart/form-data" class="d-flex gap-2"><input type="file" name="backup_file" accept=".json" class="form-control" required><button type="submit" class="btn btn-warning fw-bold">রিস্টোর</button></form></div></div></div>
@@ -1068,13 +1120,24 @@ def settings_page(request: Request, msg: Optional[str] = None):
 </body></html>"""
 
 
+@app.post("/admin/test-dummy-sms")
+def admin_test_dummy_sms(request: Request, trx_id: str = Form(...), amount: float = Form(...)):
+    if not is_authenticated(request):
+        return RedirectResponse(url="/login")
+    tid = trx_id.strip().upper()
+    ok = database.record_payment(tid, amount, "01700000000", f"ADMIN DUMMY TEST Tk {amount} TrxID {tid}")
+    msg = f"ডামি পেমেন্ট ({tid} - {amount} ৳) যুক্ত হয়েছে! এখন পোর্টালে টেস্ট করুন।" if ok else f"TrxID {tid} ইতিমধ্যে আছে, নতুন একটি নাম দিন।"
+    return RedirectResponse(url=f"/admin/settings?msg={msg}", status_code=303)
+
+
 @app.post("/admin/settings/save")
-def save_settings_action(request: Request, router_driver: str = Form("mikrotik_api"), mikrotik_host: str = Form(""), mikrotik_port: str = Form("8728"), mikrotik_user: str = Form("admin"), mikrotik_pass: str = Form(""), block_mode: str = Form("address_list"), olt_driver: str = Form("vsol_gpon_web"), olt_url: str = Form(""), olt_user: str = Form("admin"), olt_pass: str = Form(""), company_name: str = Form(""), bkash_number: str = Form(""), new_admin_password: str = Form("")):
+def save_settings_action(request: Request, router_driver: str = Form("mikrotik_api"), mikrotik_host: str = Form(""), mikrotik_port: str = Form("8728"), mikrotik_user: str = Form("admin"), mikrotik_pass: str = Form(""), block_mode: str = Form("address_list"), olt_driver: str = Form("vsol_gpon_web"), olt_url: str = Form(""), olt_user: str = Form("admin"), olt_pass: str = Form(""), company_name: str = Form(""), bkash_number: str = Form(""), new_admin_password: str = Form(""), webhook_secret: str = Form("")):
     if not is_authenticated(request): return RedirectResponse(url="/login")
     for k, v in [("router_driver", router_driver), ("mikrotik_host", mikrotik_host.strip()), ("mikrotik_port", mikrotik_port.strip()), ("mikrotik_user", mikrotik_user.strip()), ("block_mode", block_mode), ("olt_driver", olt_driver), ("olt_url", olt_url.strip()), ("olt_user", olt_user.strip()), ("company_name", company_name.strip()), ("bkash_number", bkash_number.strip())]:
         database.set_setting(k, v)
     if mikrotik_pass.strip(): database.set_setting("mikrotik_pass", mikrotik_pass.strip())
     if olt_pass.strip(): database.set_setting("olt_pass", olt_pass.strip())
+    if webhook_secret.strip(): database.set_setting("webhook_secret", webhook_secret.strip())
     _clear_caches()
     if new_admin_password.strip():
         database.set_setting("admin_password", new_admin_password.strip())
