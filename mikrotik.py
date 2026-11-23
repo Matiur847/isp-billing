@@ -163,6 +163,16 @@ class MikrotikAPI(BaseRouterDriver):
                 version = attrs.get("version", "")
         return {"ok": True, "identity": identity, "board": board, "version": version}
 
+    def get_router_clock(self):
+        try:
+            res = self.talk(["/system/clock/print"])
+            for status, attrs in res:
+                if status == "!re":
+                    return f"{attrs.get('date', '')} {attrs.get('time', '')}".strip()
+        except Exception:
+            pass
+        return ""
+
     def get_active_pppoe(self):
         res = self.talk(["/ppp/active/print"])
         iface_bytes = {}
@@ -206,6 +216,7 @@ class MikrotikAPI(BaseRouterDriver):
                     "service": attrs.get("service", "pppoe"),
                     "caller_id": attrs.get("caller-id", ""),
                     "last_caller_id": attrs.get("last-caller-id", ""),
+                    "last_logged_out": attrs.get("last-logged-out", ""),
                     "disabled": attrs.get("disabled", "false") == "true",
                     "comment": attrs.get("comment", ""),
                 })
@@ -222,7 +233,11 @@ class MikrotikAPI(BaseRouterDriver):
     def get_live_speed(self, username):
         # RouterOS <pppoe-user>: tx = router->customer (Download), rx = customer->router (Upload)
         iface_candidates = [f"<pppoe-{username}>", username]
-        speed_data = {"rx_mbps": 0.0, "tx_mbps": 0.0, "download_mbps": 0.0, "upload_mbps": 0.0, "online": False}
+        speed_data = {
+            "rx_mbps": 0.0, "tx_mbps": 0.0,
+            "download_mbps": 0.0, "upload_mbps": 0.0,
+            "dl_bps": 0, "ul_bps": 0, "online": False,
+        }
         for iface in iface_candidates:
             res = self.talk(["/interface/monitor-traffic", f"=interface={iface}", "=once="])
             for status, attrs in res:
@@ -232,10 +247,12 @@ class MikrotikAPI(BaseRouterDriver):
                     dl = round(tx_bps / 1_000_000, 2)
                     ul = round(rx_bps / 1_000_000, 2)
                     return {
-                        "rx_mbps": dl,   # Frontend Download box compatibility
-                        "tx_mbps": ul,   # Frontend Upload box compatibility
+                        "rx_mbps": dl,
+                        "tx_mbps": ul,
                         "download_mbps": dl,
                         "upload_mbps": ul,
+                        "dl_bps": tx_bps,
+                        "ul_bps": rx_bps,
                         "online": True,
                     }
         return speed_data
