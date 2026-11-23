@@ -2,7 +2,7 @@ import time
 import datetime
 from typing import Optional
 from fastapi import APIRouter, Request, Form, BackgroundTasks
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 
 import database
 import core
@@ -92,16 +92,15 @@ def admin_dashboard(request: Request, background_tasks: BackgroundTasks, edit_id
         onu_badge = f'<button type="button" class="badge bg-dark text-white border-0 mt-1" onclick="openOpticalModal({olt_pon}, {olt_onuid}, \'{core.h(onu_sn)}\')"><i class="fa-solid fa-signal text-info me-1"></i>PON{olt_pon}:{olt_onuid} ({core.h(onu_sn)})</button>' if olt_pon and olt_onuid else ""
         phone_html = core.h(c["phone"]) if c["phone"] else '<span class="text-muted">No Mobile</span>'
         search_txt = core.h((uname + " " + (c["name"] or "") + " " + (c["phone"] or "") + " " + onu_sn + " " + mac).lower())
-        net_btn = f'<a href="/admin/toggle-suspend/{c["id"]}" class="btn btn-sm btn-outline-danger fw-bold" title="নেট বন্ধ করুন"><i class="fa-solid fa-power-off"></i> Off</a>' if c["status"] == "active" else f'<a href="/admin/toggle-suspend/{c["id"]}" class="btn btn-sm btn-success fw-bold" title="নেট চালু করুন"><i class="fa-solid fa-power-off"></i> On</a>'
-
+        net_btn = f'<a href="/admin/toggle-suspend/{c["id"]}" data-cid="{c["id"]}" data-act="toggle" onclick="return ajaxLink(event,this)" class="btn btn-sm btn-outline-danger fw-bold net-toggle-btn" title="নেট বন্ধ করুন"><i class="fa-solid fa-power-off"></i> Off</a>' if c["status"] == "active" else f'<a href="/admin/toggle-suspend/{c["id"]}" data-cid="{c["id"]}" data-act="toggle" onclick="return ajaxLink(event,this)" class="btn btn-sm btn-success fw-bold net-toggle-btn" title="নেট চালু করুন"><i class="fa-solid fa-power-off"></i> On</a>'
         online_st = "online" if is_online else "offline"
         cust_rows_html += f"""
-        <div class="card mb-2 p-2 border customer-card" data-search="{search_txt}" data-status="{core.h(c['status'])}" data-online="{online_st}">
+        <div id="cust-card-{c['id']}" class="card mb-2 p-2 border customer-card" data-search="{search_txt}" data-status="{core.h(c['status'])}" data-online="{online_st}">
             <div class="row align-items-center g-2">
                 <div class="col-12 col-md-3">
-                    <div class="d-flex align-items-center flex-wrap gap-1 mb-1">{online_badge}</div>
+                    <div class="d-flex align-items-center flex-wrap gap-1 mb-1 online-wrap">{online_badge}</div>
                     <div class="small text-secondary mb-1"><i class="fa-solid fa-arrow-down-up-across-line text-primary"></i> <b>{usage_gb:.2f} GB</b> &nbsp; <i class="fa-solid fa-network-wired text-muted"></i> <b>{core.h(ip)}</b></div>
-                    <div class="small text-muted"><i class="fa-solid fa-fingerprint"></i> <span class="text-secondary">{core.h(mac)}</span> {bind_badge}</div>
+                    <div class="small text-muted"><i class="fa-solid fa-fingerprint"></i> <span class="text-secondary">{core.h(mac)}</span> <span class="bind-wrap">{bind_badge}</span></div>
                     {onu_badge}
                 </div>
                 <div class="col-12 col-md-3">
@@ -115,9 +114,9 @@ def admin_dashboard(request: Request, background_tasks: BackgroundTasks, edit_id
                     <div class="small text-secondary mt-1"><i class="fa-solid fa-cubes"></i> {core.h(c['package_name'])}</div>
                 </div>
                 <div class="col-6 col-md-3">
-                    <div class="d-flex align-items-center flex-wrap gap-1 mb-1"><span class="badge {st_cls} rounded-pill">{st_lbl}</span><span class="badge {time_cls} rounded-pill">⌛ {time_lbl}</span></div>
+                    <div class="d-flex align-items-center flex-wrap gap-1 mb-1 status-wrap"><span class="badge {st_cls} rounded-pill">{st_lbl}</span><span class="badge {time_cls} rounded-pill">⌛ {time_lbl}</span></div>
                     <div class="small text-dark fw-bold mb-1"><i class="fa-solid fa-bangladeshi-taka-sign text-primary"></i> {c['package_price']} TK</div>
-                    <div class="small text-secondary"><i class="fa-regular fa-calendar-days text-danger"></i> {exp_fmt}</div>
+                    <div class="small text-secondary exp-text"><i class="fa-regular fa-calendar-days text-danger"></i> {exp_fmt}</div>
                 </div>
                 <div class="col-auto ms-auto d-flex align-items-center gap-2">
                     {net_btn}
@@ -232,21 +231,65 @@ function filterCustomerCards(){{
     }});
 }}
 let actionModalInstance=null;
+function showToast(msg, ok=true){{
+    let box=document.getElementById("toastBox");
+    if(!box){{box=document.createElement("div");box.id="toastBox";box.className="position-fixed bottom-0 end-0 p-3";box.style.zIndex="2000";document.body.appendChild(box);}}
+    const el=document.createElement("div");
+    el.className=`alert ${{ok?"alert-success":"alert-danger"}} shadow fw-bold mb-2 py-2 px-3`;
+    el.innerText=(ok?"✅ ":"❌ ")+msg;
+    box.appendChild(el);
+    setTimeout(()=>el.remove(),3000);
+}}
+async function ajaxLink(e,el){{e.preventDefault();return runAjaxAction(el.href,el.dataset.act,el.dataset.cid);}}
+async function runAjaxAction(url,act,cid){{
+    try{{
+        const res=await fetch(url,{{headers:{{"X-Ajax":"1"}}}});
+        const d=await res.json();
+        if(!d.ok){{showToast(d.error||"সমস্যা হয়েছে!",false);return false;}}
+        showToast(d.msg||"সম্পন্ন হয়েছে!",true);
+        if(actionModalInstance)actionModalInstance.hide();
+        const card=document.getElementById("cust-card-"+cid);
+        if(!card)return false;
+        const btn=card.querySelector(".btn-outline-primary.rounded-circle");
+        if(act==="delete"){{card.style.opacity="0.3";setTimeout(()=>{{card.remove();}},250);return false;}}
+        if(act==="kick"){{
+            card.dataset.online="offline";
+            card.querySelector(".online-wrap").innerHTML='<span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle rounded-pill px-2">○ Offline</span> <span class="text-danger small fw-bold">• এইমাত্র</span>';
+        }}
+        if(act==="bind"){{
+            card.querySelector(".bind-wrap").innerHTML=d.bound?'<span class="badge bg-primary-subtle text-primary border border-primary-subtle"><i class="fa-solid fa-lock"></i> Bound</span>':'<span class="badge bg-light text-muted border"><i class="fa-solid fa-lock-open"></i> Unbound</span>';
+            if(btn)btn.dataset.bound=d.bound?(d.mac||"1"):"";
+        }}
+        if(act==="toggle"||act==="extend"){{
+            card.dataset.status=d.status;
+            if(btn)btn.dataset.status=d.status;
+            if(d.status_html)card.querySelector(".status-wrap").innerHTML=d.status_html;
+            if(d.expiry)card.querySelector(".exp-text").innerHTML='<i class="fa-regular fa-calendar-days text-danger"></i> '+d.expiry;
+            const nb=card.querySelector(".net-toggle-btn");
+            if(nb){{
+                nb.className=d.status==="active"?"btn btn-sm btn-outline-danger fw-bold net-toggle-btn":"btn btn-sm btn-success fw-bold net-toggle-btn";
+                nb.innerHTML=d.status==="active"?'<i class="fa-solid fa-power-off"></i> Off':'<i class="fa-solid fa-power-off"></i> On';
+            }}
+            filterCustomerCards();
+        }}
+    }}catch(err){{showToast("নেটওয়ার্ক ত্রুটি!",false);}}
+    return false;
+}}
 function openActionDrawer(btn){{
     const d=btn.dataset;
     document.getElementById("actionModalTitle").innerText="Customer: #"+(parseInt(d.id)+40500)+" ("+d.name+")";
     const suspendLabel=d.status==="active"?'<i class="fa-solid fa-circle-pause"></i> Suspend':'<i class="fa-solid fa-circle-play"></i> Activate';
-    const macBtn=d.bound?`<a href="/admin/bind-mac/${{d.id}}?unbind=1" class="btn btn-outline-dark w-100 action-btn"><i class="fa-solid fa-lock-open"></i> Unbind MAC</a>`:(d.mac?`<a href="/admin/bind-mac/${{d.id}}?mac=${{encodeURIComponent(d.mac)}}" class="btn btn-outline-dark w-100 action-btn"><i class="fa-solid fa-lock"></i> Bind MAC</a>`:`<button disabled class="btn btn-outline-secondary w-100 action-btn"><i class="fa-solid fa-lock"></i> Offline</button>`);
+    const macBtn=d.bound?`<button onclick="runAjaxAction('/admin/bind-mac/${{d.id}}?unbind=1','bind',${{d.id}})" class="btn btn-outline-dark w-100 action-btn"><i class="fa-solid fa-lock-open"></i> Unbind MAC</button>`:(d.mac?`<button onclick="runAjaxAction('/admin/bind-mac/${{d.id}}?mac=${{encodeURIComponent(d.mac)}}','bind',${{d.id}})" class="btn btn-outline-dark w-100 action-btn"><i class="fa-solid fa-lock"></i> Bind MAC</button>`:`<button disabled class="btn btn-outline-secondary w-100 action-btn"><i class="fa-solid fa-lock"></i> Offline</button>`);
     const onuBtn=(parseInt(d.pon)>0&&parseInt(d.onuid)>0)?`<div class="col-6"><button onclick="actionModalInstance.hide();openOpticalModal(${{d.pon}},${{d.onuid}},'${{d.sn}}')" class="btn btn-outline-dark w-100 action-btn"><i class="fa-solid fa-signal text-info"></i> ONU Power</button></div>`:'';
     document.getElementById("actionButtonsGrid").innerHTML=`
         <div class="col-6"><a href="/admin?edit_id=${{d.id}}" class="btn btn-outline-primary w-100 action-btn"><i class="fa-solid fa-pen-to-square"></i> Edit</a></div>
-        <div class="col-6"><a href="/admin/toggle-suspend/${{d.id}}" class="btn btn-outline-warning w-100 action-btn">${{suspendLabel}}</a></div>
-        <div class="col-6"><a href="/admin/quick-extend/${{d.id}}" class="btn btn-outline-success w-100 action-btn"><i class="fa-solid fa-calendar-plus"></i> Recharge (+30d)</a></div>
-        <div class="col-6"><a href="/admin/kick/${{encodeURIComponent(d.username)}}" class="btn btn-outline-info w-100 action-btn"><i class="fa-solid fa-plug-circle-xmark"></i> Disconnect</a></div>
+        <div class="col-6"><button onclick="runAjaxAction('/admin/toggle-suspend/${{d.id}}','toggle',${{d.id}})" class="btn btn-outline-warning w-100 action-btn">${{suspendLabel}}</button></div>
+        <div class="col-6"><button onclick="runAjaxAction('/admin/quick-extend/${{d.id}}','extend',${{d.id}})" class="btn btn-outline-success w-100 action-btn"><i class="fa-solid fa-calendar-plus"></i> Recharge (+30d)</button></div>
+        <div class="col-6"><button onclick="runAjaxAction('/admin/kick/${{encodeURIComponent(d.username)}}','kick',${{d.id}})" class="btn btn-outline-info w-100 action-btn"><i class="fa-solid fa-plug-circle-xmark"></i> Disconnect</button></div>
         <div class="col-6"><button onclick="actionModalInstance.hide();openLiveSpeed('${{d.username}}','${{d.name}}')" class="btn btn-outline-primary w-100 action-btn"><i class="fa-solid fa-chart-line"></i> Live Speed</button></div>
         <div class="col-6">${{macBtn}}</div>${{onuBtn}}
         <div class="col-6"><a href="/?query=${{encodeURIComponent(d.username)}}" target="_blank" class="btn btn-outline-secondary w-100 action-btn"><i class="fa-solid fa-arrow-up-right-from-square"></i> Portal</a></div>
-        <div class="col-12 mt-2"><a href="/admin/delete/${{d.id}}" onclick="return confirm('আপনি কি নিশ্চিত এই গ্রাহককে মুছে ফেলতে চান?');" class="btn btn-outline-danger w-100 action-btn"><i class="fa-solid fa-trash"></i> Delete Account</a></div>`;
+        <div class="col-12 mt-2"><button onclick="if(confirm('আপনি কি নিশ্চিত এই গ্রাহককে মুছে ফেলতে চান?'))runAjaxAction('/admin/delete/${{d.id}}','delete',${{d.id}})" class="btn btn-outline-danger w-100 action-btn"><i class="fa-solid fa-trash"></i> Delete Account</button></div>`;
     actionModalInstance=new bootstrap.Modal(document.getElementById("actionModal"));actionModalInstance.show();
 }}
 function openLiveSpeedBtn(btn){{openLiveSpeed(btn.dataset.username,btn.dataset.name);}}
@@ -387,8 +430,13 @@ def update_customer_action(request: Request, background_tasks: BackgroundTasks, 
 @router.get("/admin/quick-extend/{cust_id}")
 def quick_extend_action(request: Request, background_tasks: BackgroundTasks, cust_id: int):
     if not core.is_authenticated(request): return RedirectResponse(url="/login")
-    username, _ = database.extend_customer(cust_id, days=30)
+    username, new_exp = database.extend_customer(cust_id, days=30)
     if username: background_tasks.add_task(core.unblock_in_mikrotik, username)
+    if request.headers.get("x-ajax") == "1":
+        tl, tc, sl, sc = core.calculate_expiry_label(new_exp or "", "active")
+        try: exp_fmt = datetime.datetime.strptime(new_exp[:19], "%Y-%m-%d %H:%M:%S").strftime("%b %d %Y %H:%M")
+        except Exception: exp_fmt = new_exp or ""
+        return JSONResponse({"ok": True, "status": "active", "expiry": exp_fmt, "status_html": f'<span class="badge {sc} rounded-pill">{sl}</span> <span class="badge {tc} rounded-pill">⌛ {tl}</span>', "msg": "৩০ দিন রিচার্জ সফল হয়েছে!"})
     return RedirectResponse(url="/admin", status_code=303)
 
 
@@ -396,10 +444,14 @@ def quick_extend_action(request: Request, background_tasks: BackgroundTasks, cus
 def toggle_suspend_action(request: Request, background_tasks: BackgroundTasks, cust_id: int):
     if not core.is_authenticated(request): return RedirectResponse(url="/login")
     cust = database.get_customer_by_id(cust_id)
+    ns = "active"
     if cust:
         ns = "expired" if cust["status"] == "active" else "active"
         database.update_customer_full(cust_id, cust["name"], cust["phone"], cust["password"], cust["package_name"], cust["package_price"], cust["profile"], cust["expiry_date"], ns)
         background_tasks.add_task(core.unblock_in_mikrotik if ns == "active" else core.block_in_mikrotik, cust["username"])
+    if request.headers.get("x-ajax") == "1":
+        tl, tc, sl, sc = core.calculate_expiry_label(cust["expiry_date"] if cust else "", ns)
+        return JSONResponse({"ok": True, "status": ns, "status_html": f'<span class="badge {sc} rounded-pill">{sl}</span> <span class="badge {tc} rounded-pill">⌛ {tl}</span>', "msg": "নেট চালু করা হয়েছে!" if ns == "active" else "নেট বন্ধ করা হয়েছে!"})
     return RedirectResponse(url="/admin", status_code=303)
 
 
@@ -408,7 +460,10 @@ def kick_user_action(request: Request, username: str):
     if not core.is_authenticated(request): return RedirectResponse(url="/login")
     try:
         api = core.get_mikrotik_conn(); api.kick_user(username); api.close()
-    except Exception: pass
+    except Exception as e:
+        if request.headers.get("x-ajax") == "1": return JSONResponse({"ok": False, "error": str(e)})
+    if request.headers.get("x-ajax") == "1":
+        return JSONResponse({"ok": True, "msg": f"{username} ডিসকানেক্ট করা হয়েছে!"})
     return RedirectResponse(url="/admin", status_code=303)
 
 
@@ -422,7 +477,10 @@ def bind_mac_action(request: Request, cust_id: int, mac: str = "", unbind: int =
             api = core.get_mikrotik_conn(); api.bind_mac(cust["username"], tmac); api.close()
             database.update_customer_mac(cust_id, tmac)
         except Exception as e:
+            if request.headers.get("x-ajax") == "1": return JSONResponse({"ok": False, "error": str(e)})
             return RedirectResponse(url=f"/admin?msg=MAC+Bind+ত্রুটি:+{e}", status_code=303)
+    if request.headers.get("x-ajax") == "1":
+        return JSONResponse({"ok": True, "bound": not bool(unbind), "mac": "" if unbind else mac.strip(), "msg": "MAC Unbind হয়েছে!" if unbind else "MAC Bind হয়েছে!"})
     return RedirectResponse(url="/admin", status_code=303)
 
 
@@ -431,6 +489,8 @@ def delete_customer_action(request: Request, background_tasks: BackgroundTasks, 
     if not core.is_authenticated(request): return RedirectResponse(url="/login")
     username = database.delete_customer(cust_id)
     if username: background_tasks.add_task(core.delete_secret_from_mikrotik, username)
+    if request.headers.get("x-ajax") == "1":
+        return JSONResponse({"ok": True, "msg": "গ্রাহক মুছে ফেলা হয়েছে!"})
     return RedirectResponse(url="/admin", status_code=303)
 
 
