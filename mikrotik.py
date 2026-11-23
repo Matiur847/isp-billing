@@ -3,6 +3,7 @@ import ssl
 import hashlib
 import binascii
 import logging
+import threading
 
 logger = logging.getLogger("mikrotik")
 
@@ -33,7 +34,7 @@ class MikrotikAPI(BaseRouterDriver):
         if not self.host:
             raise ValueError("MikroTik host is not configured")
         raw_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        raw_sock.settimeout(10.0)
+        raw_sock.settimeout(8.0)
         if self.use_ssl:
             ctx = ssl.create_default_context()
             ctx.check_hostname = False
@@ -232,30 +233,28 @@ class MikrotikAPI(BaseRouterDriver):
 
     def get_live_speed(self, username):
         # RouterOS <pppoe-user>: tx = router->customer (Download), rx = customer->router (Upload)
-        iface_candidates = [f"<pppoe-{username}>", username]
-        speed_data = {
+        iface = f"<pppoe-{username}>"
+        res = self.talk(["/interface/monitor-traffic", f"=interface={iface}", "=once="])
+        for status, attrs in res:
+            if status == "!re":
+                tx_bps = int(attrs.get("tx-bits-per-second", 0) or 0)
+                rx_bps = int(attrs.get("rx-bits-per-second", 0) or 0)
+                dl = round(tx_bps / 1_000_000, 2)
+                ul = round(rx_bps / 1_000_000, 2)
+                return {
+                    "rx_mbps": dl,
+                    "tx_mbps": ul,
+                    "download_mbps": dl,
+                    "upload_mbps": ul,
+                    "dl_bps": tx_bps,
+                    "ul_bps": rx_bps,
+                    "online": True,
+                }
+        return {
             "rx_mbps": 0.0, "tx_mbps": 0.0,
             "download_mbps": 0.0, "upload_mbps": 0.0,
             "dl_bps": 0, "ul_bps": 0, "online": False,
         }
-        for iface in iface_candidates:
-            res = self.talk(["/interface/monitor-traffic", f"=interface={iface}", "=once="])
-            for status, attrs in res:
-                if status == "!re":
-                    tx_bps = int(attrs.get("tx-bits-per-second", 0) or 0)
-                    rx_bps = int(attrs.get("rx-bits-per-second", 0) or 0)
-                    dl = round(tx_bps / 1_000_000, 2)
-                    ul = round(rx_bps / 1_000_000, 2)
-                    return {
-                        "rx_mbps": dl,
-                        "tx_mbps": ul,
-                        "download_mbps": dl,
-                        "upload_mbps": ul,
-                        "dl_bps": tx_bps,
-                        "ul_bps": rx_bps,
-                        "online": True,
-                    }
-        return speed_data
 
     def kick_user(self, username):
         actives = self.get_active_pppoe()
@@ -370,3 +369,32 @@ ROUTER_DRIVERS = {
 def get_router_driver(driver_name, host, port, user, password) -> BaseRouterDriver:
     cls = ROUTER_DRIVERS.get(driver_name, MikrotikAPI)
     return cls(host=host, port=port, user=user, password=password)
+
+
+class LiveMikrotikPool:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._client = None
+        self._sig = None
+
+    def get_live_speed(self, driver_name, host, port, user, password, username):
+        sig = (driver_name, host, int(port), user, password)
+        with self._lock:
+            for attempt in range(2):
+                try:
+                    if self._client is None or self._sig != sig:
+                        if self._client:
+                            self._client.close()
+                        self._client = get_router_driver(driver_name, host, port, user, password)
+                        self._client.connect()
+                        self._sig = sig
+                    return self._client.get_live_speed(username)
+                except Exception as e:
+                    if self._client:
+                        self._client.close()
+                    self._client = None
+                    if attempt == 1:
+                        raise e
+
+
+live_pool = LiveMikrotikPool()
