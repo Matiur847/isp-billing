@@ -12,7 +12,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, Resp
 from itsdangerous import URLSafeSerializer, BadSignature
 
 import database
-from mikrotik import get_router_driver, ROUTER_DRIVERS
+from mikrotik import get_router_driver, ROUTER_DRIVERS, live_pool
 from olt import get_olt_driver, OLT_DRIVERS, normalize_mac
 
 logging.basicConfig(level=logging.INFO)
@@ -238,17 +238,19 @@ def parse_bkash_sms(text: str):
 
 
 @app.get("/api/search")
-async def api_search(q: str = ""):
+def api_search(q: str = ""):
     return database.search_customers(q, limit=8)
 
 
 @app.get("/api/live-speed/{username}")
-async def api_live_speed(username: str):
+def api_live_speed(username: str):
     try:
-        api = get_mikrotik_conn()
-        speed = api.get_live_speed(username)
-        api.close()
-        return speed
+        driver = database.get_setting("router_driver", "mikrotik_api")
+        host = database.get_setting("mikrotik_host", "")
+        port = int(database.get_setting("mikrotik_port", "8728") or 8728)
+        user = database.get_setting("mikrotik_user", "admin")
+        pwd = database.get_setting("mikrotik_pass", "")
+        return live_pool.get_live_speed(driver, host, port, user, pwd, username)
     except Exception as e:
         return {"rx_mbps": 0.0, "tx_mbps": 0.0, "dl_bps": 0, "ul_bps": 0, "online": False, "error": str(e)}
 
@@ -269,13 +271,13 @@ async def sms_webhook(request: Request):
 
 
 @app.get("/api/cron/check-expiry")
-async def trigger_expiry_check():
+def trigger_expiry_check():
     check_expired_users_task()
     return {"status": "success", "message": "Expiry check executed"}
 
 
 @app.get("/login", response_class=HTMLResponse)
-async def login_page(error: Optional[str] = None):
+def login_page(error: Optional[str] = None):
     company = h(get_company_name())
     err_html = f"<div class='alert alert-danger py-2 small'>{h(error)}</div>" if error else ""
     return f"""<!DOCTYPE html><html lang="bn"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -290,7 +292,7 @@ async def login_page(error: Optional[str] = None):
 
 
 @app.post("/login")
-async def do_login(password: str = Form(...)):
+def do_login(password: str = Form(...)):
     admin_pass = database.get_setting("admin_password", "admin123")
     if password == admin_pass:
         token = _get_serializer().dumps({"auth": True, "ph": _pass_hash(admin_pass)})
@@ -301,14 +303,14 @@ async def do_login(password: str = Form(...)):
 
 
 @app.get("/logout")
-async def do_logout():
+def do_logout():
     response = RedirectResponse(url="/login", status_code=status.HTTP_303_SEE_OTHER)
     response.delete_cookie(COOKIE_NAME)
     return response
 
 
 @app.get("/", response_class=HTMLResponse)
-async def customer_portal(query: Optional[str] = None, user_id: Optional[int] = None):
+def customer_portal(query: Optional[str] = None, user_id: Optional[int] = None):
     company = h(get_company_name())
     bkash_num = h(database.get_setting("bkash_number", "01XXXXXXXXX"))
     selected_customer = database.get_customer_by_id(user_id) if user_id else None
@@ -366,7 +368,7 @@ if(si&&sr){{si.addEventListener('input',async function(){{const q=this.value.tri
 
 
 @app.post("/api/pay", response_class=HTMLResponse)
-async def process_payment(background_tasks: BackgroundTasks, username: str = Form(...), trx_id: str = Form(...)):
+def process_payment(background_tasks: BackgroundTasks, username: str = Form(...), trx_id: str = Form(...)):
     company = h(get_company_name())
     success, message = database.verify_and_apply_payment(username, trx_id)
     if success:
@@ -379,7 +381,7 @@ async def process_payment(background_tasks: BackgroundTasks, username: str = For
 
 
 @app.get("/admin", response_class=HTMLResponse)
-async def admin_dashboard(request: Request, background_tasks: BackgroundTasks, edit_id: Optional[int] = None, msg: Optional[str] = None):
+def admin_dashboard(request: Request, background_tasks: BackgroundTasks, edit_id: Optional[int] = None, msg: Optional[str] = None):
     if not is_authenticated(request):
         return RedirectResponse(url="/login")
 
@@ -595,7 +597,7 @@ function formatBps(bps){{
     return (bps/1000000).toFixed(2).replace(/\\.00$/,"")+" Mbps";
 }}
 
-let speedInterval=null, speedChartObj=null;
+let speedTimer=null, speedChartObj=null, speedSid=0, speedAbort=null;
 function initSpeedChart(){{
     const canvas=document.getElementById("speedChart");
     const ctx=canvas.getContext("2d");
@@ -609,12 +611,12 @@ function initSpeedChart(){{
         data:{{
             labels:[],
             datasets:[
-                {{label:"Upload",data:[],borderColor:"#ef4444",backgroundColor:gUl,borderWidth:2.5,tension:0.4,fill:true,pointRadius:0}},
-                {{label:"Download",data:[],borderColor:"#22c55e",backgroundColor:gDl,borderWidth:2.5,tension:0.4,fill:true,pointRadius:0}}
+                {{label:"Upload",data:[],borderColor:"#ef4444",backgroundColor:gUl,borderWidth:2.5,tension:0.35,fill:true,pointRadius:0}},
+                {{label:"Download",data:[],borderColor:"#22c55e",backgroundColor:gDl,borderWidth:2.5,tension:0.35,fill:true,pointRadius:0}}
             ]
         }},
         options:{{
-            responsive:true,maintainAspectRatio:false,animation:{{duration:250}},
+            responsive:true,maintainAspectRatio:false,animation:false,
             plugins:{{legend:{{display:false}}}},
             scales:{{
                 x:{{grid:{{display:false}},ticks:{{maxTicksLimit:6,color:"#64748b",font:{{size:11}}}}}},
@@ -624,20 +626,29 @@ function initSpeedChart(){{
     }});
 }}
 
-function openLiveSpeed(u,n){{
-    document.getElementById("speedUserLabel").innerText=n+" ("+u+")";
-    document.getElementById("dlText").innerText="0 bps";
-    document.getElementById("ulText").innerText="0 bps";
-    initSpeedChart();
-    new bootstrap.Modal(document.getElementById("speedModal")).show();
-    fetchSpeed(u);
-    if(speedInterval)clearInterval(speedInterval);
-    speedInterval=setInterval(()=>fetchSpeed(u),1500);
+function stopSpeedMonitor(){{
+    speedSid++;
+    if(speedTimer){{clearTimeout(speedTimer);speedTimer=null;}}
+    if(speedAbort){{speedAbort.abort();speedAbort=null;}}
 }}
 
-async function fetchSpeed(u){{
+function openLiveSpeed(u,n){{
+    stopSpeedMonitor();
+    const mySid=speedSid;
+    document.getElementById("speedUserLabel").innerText=n+" ("+u+")";
+    document.getElementById("dlText").innerText="লোড হচ্ছে...";
+    document.getElementById("ulText").innerText="লোড হচ্ছে...";
+    initSpeedChart();
+    new bootstrap.Modal(document.getElementById("speedModal")).show();
+    pollSpeedLoop(u,mySid);
+}}
+
+async function pollSpeedLoop(u,mySid){{
+    if(mySid!==speedSid)return;
+    speedAbort=new AbortController();
     try{{
-        const r=await fetch('/api/live-speed/'+encodeURIComponent(u));
+        const r=await fetch('/api/live-speed/'+encodeURIComponent(u),{{signal:speedAbort.signal}});
+        if(mySid!==speedSid)return;
         const d=await r.json();
         const dl=d.dl_bps!==undefined?d.dl_bps:Math.round((d.rx_mbps||0)*1000000);
         const ul=d.ul_bps!==undefined?d.ul_bps:Math.round((d.tx_mbps||0)*1000000);
@@ -656,11 +667,17 @@ async function fetchSpeed(u){{
                 speedChartObj.data.datasets[0].data.shift();
                 speedChartObj.data.datasets[1].data.shift();
             }}
-            speedChartObj.update();
+            speedChartObj.update('none');
         }}
-    }}catch(e){{}}
+    }}catch(e){{
+        if(e.name==="AbortError")return;
+    }}
+    if(mySid===speedSid){{
+        speedTimer=setTimeout(()=>pollSpeedLoop(u,mySid),250);
+    }}
 }}
-document.getElementById("speedModal").addEventListener('hidden.bs.modal',()=>{{if(speedInterval)clearInterval(speedInterval);}});
+document.getElementById("speedModal").addEventListener('hidden.bs.modal',stopSpeedMonitor);
+
 async function openOpticalModal(pon,onuid,sn){{
     const b=document.getElementById("opticalModalBody");b.innerHTML='<div class="text-center py-4"><div class="spinner-border text-primary"></div><div class="mt-2">লোড হচ্ছে...</div></div>';
     new bootstrap.Modal(document.getElementById("opticalModal")).show();
@@ -672,7 +689,7 @@ async function openOpticalModal(pon,onuid,sn){{
 
 
 @app.post("/admin/create-customer")
-async def create_customer_action(request: Request, background_tasks: BackgroundTasks, username: str = Form(...), password: str = Form(...), name: str = Form(""), phone: str = Form(""), package_name: str = Form("25 Mbps"), package_price: int = Form(525), profile: str = Form("default"), days_valid: int = Form(30)):
+def create_customer_action(request: Request, background_tasks: BackgroundTasks, username: str = Form(...), password: str = Form(...), name: str = Form(""), phone: str = Form(""), package_name: str = Form("25 Mbps"), package_price: int = Form(525), profile: str = Form("default"), days_valid: int = Form(30)):
     if not is_authenticated(request): return RedirectResponse(url="/login")
     ok, _ = database.create_customer(username, password, name, phone, package_name, package_price, profile, days_valid)
     if ok: background_tasks.add_task(sync_secret_to_mikrotik, username, password, profile)
@@ -680,7 +697,7 @@ async def create_customer_action(request: Request, background_tasks: BackgroundT
 
 
 @app.post("/admin/update-customer")
-async def update_customer_action(request: Request, background_tasks: BackgroundTasks, cust_id: int = Form(...), name: str = Form(""), phone: str = Form(""), password: str = Form(...), package_name: str = Form("25 Mbps"), package_price: int = Form(525), profile: str = Form("default"), expiry_date: str = Form(...), status: str = Form("active")):
+def update_customer_action(request: Request, background_tasks: BackgroundTasks, cust_id: int = Form(...), name: str = Form(""), phone: str = Form(""), password: str = Form(...), package_name: str = Form("25 Mbps"), package_price: int = Form(525), profile: str = Form("default"), expiry_date: str = Form(...), status: str = Form("active")):
     if not is_authenticated(request): return RedirectResponse(url="/login")
     database.update_customer_full(cust_id, name, phone, password, package_name, package_price, profile, expiry_date, status)
     cust = database.get_customer_by_id(cust_id)
@@ -691,7 +708,7 @@ async def update_customer_action(request: Request, background_tasks: BackgroundT
 
 
 @app.get("/admin/quick-extend/{cust_id}")
-async def quick_extend_action(request: Request, background_tasks: BackgroundTasks, cust_id: int):
+def quick_extend_action(request: Request, background_tasks: BackgroundTasks, cust_id: int):
     if not is_authenticated(request): return RedirectResponse(url="/login")
     username, _ = database.extend_customer(cust_id, days=30)
     if username: background_tasks.add_task(unblock_in_mikrotik, username)
@@ -699,7 +716,7 @@ async def quick_extend_action(request: Request, background_tasks: BackgroundTask
 
 
 @app.get("/admin/toggle-suspend/{cust_id}")
-async def toggle_suspend_action(request: Request, background_tasks: BackgroundTasks, cust_id: int):
+def toggle_suspend_action(request: Request, background_tasks: BackgroundTasks, cust_id: int):
     if not is_authenticated(request): return RedirectResponse(url="/login")
     cust = database.get_customer_by_id(cust_id)
     if cust:
@@ -710,7 +727,7 @@ async def toggle_suspend_action(request: Request, background_tasks: BackgroundTa
 
 
 @app.get("/admin/kick/{username}")
-async def kick_user_action(request: Request, username: str):
+def kick_user_action(request: Request, username: str):
     if not is_authenticated(request): return RedirectResponse(url="/login")
     try:
         api = get_mikrotik_conn(); api.kick_user(username); api.close()
@@ -719,7 +736,7 @@ async def kick_user_action(request: Request, username: str):
 
 
 @app.get("/admin/bind-mac/{cust_id}")
-async def bind_mac_action(request: Request, cust_id: int, mac: str = "", unbind: int = 0):
+def bind_mac_action(request: Request, cust_id: int, mac: str = "", unbind: int = 0):
     if not is_authenticated(request): return RedirectResponse(url="/login")
     cust = database.get_customer_by_id(cust_id)
     if cust:
@@ -733,7 +750,7 @@ async def bind_mac_action(request: Request, cust_id: int, mac: str = "", unbind:
 
 
 @app.get("/admin/delete/{cust_id}")
-async def delete_customer_action(request: Request, background_tasks: BackgroundTasks, cust_id: int):
+def delete_customer_action(request: Request, background_tasks: BackgroundTasks, cust_id: int):
     if not is_authenticated(request): return RedirectResponse(url="/login")
     username = database.delete_customer(cust_id)
     if username: background_tasks.add_task(delete_secret_from_mikrotik, username)
@@ -741,7 +758,7 @@ async def delete_customer_action(request: Request, background_tasks: BackgroundT
 
 
 @app.get("/admin/sync-mikrotik")
-async def sync_mikrotik_users(request: Request):
+def sync_mikrotik_users(request: Request):
     if not is_authenticated(request): return RedirectResponse(url="/login")
     try:
         api = get_mikrotik_conn(); secrets_list = api.get_all_secrets(); api.close()
@@ -751,9 +768,9 @@ async def sync_mikrotik_users(request: Request):
         return RedirectResponse(url=f"/admin?msg=MikroTik+সিঙ্ক+ব্যর্থ:+{e}", status_code=303)
 
 
-# --- OLT MONITOR (Auto-Match Customer by PON MAC + 1-Click VLAN) ---
+# --- OLT MONITOR ---
 @app.get("/admin/olt", response_class=HTMLResponse)
-async def olt_dashboard(request: Request, background_tasks: BackgroundTasks, pon_id: str = "2", msg: Optional[str] = None):
+def olt_dashboard(request: Request, background_tasks: BackgroundTasks, pon_id: str = "2", msg: Optional[str] = None):
     if not is_authenticated(request):
         return RedirectResponse(url="/login")
 
@@ -938,7 +955,7 @@ async function openOpticalModal(p,o,sn){{
 
 
 @app.post("/admin/olt/change-vlan")
-async def olt_change_vlan(request: Request, pon_id: int = Form(...), onu_id: int = Form(...), linename: str = Form(...), srvname: str = Form(...), back_pon: str = Form("2")):
+def olt_change_vlan(request: Request, pon_id: int = Form(...), onu_id: int = Form(...), linename: str = Form(...), srvname: str = Form(...), back_pon: str = Form("2")):
     if not is_authenticated(request):
         return RedirectResponse(url="/login")
     try:
@@ -949,7 +966,7 @@ async def olt_change_vlan(request: Request, pon_id: int = Form(...), onu_id: int
 
 
 @app.get("/api/olt/optical")
-async def api_olt_optical(request: Request, pon_id: int, onu_id: int):
+def api_olt_optical(request: Request, pon_id: int, onu_id: int):
     if not is_authenticated(request):
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     try:
@@ -959,7 +976,7 @@ async def api_olt_optical(request: Request, pon_id: int, onu_id: int):
 
 
 @app.post("/admin/olt/link")
-async def olt_link_customer(request: Request, cust_id: int = Form(...), pon_id: int = Form(...), onu_id: int = Form(...), onu_sn: str = Form(""), back_pon: str = Form("2")):
+def olt_link_customer(request: Request, cust_id: int = Form(...), pon_id: int = Form(...), onu_id: int = Form(...), onu_sn: str = Form(""), back_pon: str = Form("2")):
     if not is_authenticated(request):
         return RedirectResponse(url="/login")
     database.link_customer_onu(cust_id, pon_id, onu_id, onu_sn)
@@ -967,7 +984,7 @@ async def olt_link_customer(request: Request, cust_id: int = Form(...), pon_id: 
 
 
 @app.get("/admin/olt/reboot")
-async def olt_reboot_onu(request: Request, pon_id: int, onu_id: int, back_pon: str = "2"):
+def olt_reboot_onu(request: Request, pon_id: int, onu_id: int, back_pon: str = "2"):
     if not is_authenticated(request):
         return RedirectResponse(url="/login")
     try:
@@ -979,7 +996,7 @@ async def olt_reboot_onu(request: Request, pon_id: int, onu_id: int, back_pon: s
 
 # --- SETTINGS & BACKUP ---
 @app.get("/admin/settings", response_class=HTMLResponse)
-async def settings_page(request: Request, msg: Optional[str] = None):
+def settings_page(request: Request, msg: Optional[str] = None):
     if not is_authenticated(request):
         return RedirectResponse(url="/login")
     s = database.get_all_settings()
@@ -1031,7 +1048,7 @@ async def settings_page(request: Request, msg: Optional[str] = None):
 
 
 @app.post("/admin/settings/save")
-async def save_settings_action(request: Request, router_driver: str = Form("mikrotik_api"), mikrotik_host: str = Form(""), mikrotik_port: str = Form("8728"), mikrotik_user: str = Form("admin"), mikrotik_pass: str = Form(""), block_mode: str = Form("address_list"), olt_driver: str = Form("vsol_gpon_web"), olt_url: str = Form(""), olt_user: str = Form("admin"), olt_pass: str = Form(""), company_name: str = Form(""), bkash_number: str = Form(""), new_admin_password: str = Form("")):
+def save_settings_action(request: Request, router_driver: str = Form("mikrotik_api"), mikrotik_host: str = Form(""), mikrotik_port: str = Form("8728"), mikrotik_user: str = Form("admin"), mikrotik_pass: str = Form(""), block_mode: str = Form("address_list"), olt_driver: str = Form("vsol_gpon_web"), olt_url: str = Form(""), olt_user: str = Form("admin"), olt_pass: str = Form(""), company_name: str = Form(""), bkash_number: str = Form(""), new_admin_password: str = Form("")):
     if not is_authenticated(request): return RedirectResponse(url="/login")
     for k, v in [("router_driver", router_driver), ("mikrotik_host", mikrotik_host.strip()), ("mikrotik_port", mikrotik_port.strip()), ("mikrotik_user", mikrotik_user.strip()), ("block_mode", block_mode), ("olt_driver", olt_driver), ("olt_url", olt_url.strip()), ("olt_user", olt_user.strip()), ("company_name", company_name.strip()), ("bkash_number", bkash_number.strip())]:
         database.set_setting(k, v)
@@ -1047,7 +1064,7 @@ async def save_settings_action(request: Request, router_driver: str = Form("mikr
 
 
 @app.get("/api/test-mikrotik")
-async def api_test_mikrotik(request: Request):
+def api_test_mikrotik(request: Request):
     if not is_authenticated(request): return JSONResponse({"ok": False, "error": "Unauthorized"}, status_code=401)
     try:
         api = get_mikrotik_conn(); res = api.test_connection(); api.close(); return res
@@ -1056,7 +1073,7 @@ async def api_test_mikrotik(request: Request):
 
 
 @app.get("/api/test-olt")
-async def api_test_olt(request: Request):
+def api_test_olt(request: Request):
     if not is_authenticated(request): return JSONResponse({"ok": False, "error": "Unauthorized"}, status_code=401)
     try:
         info = get_olt_conn().get_system_info()
@@ -1066,7 +1083,7 @@ async def api_test_olt(request: Request):
 
 
 @app.get("/admin/backup/download")
-async def download_backup(request: Request):
+def download_backup(request: Request):
     if not is_authenticated(request): return RedirectResponse(url="/login")
     return Response(content=database.export_backup_json(), media_type="application/json", headers={"Content-Disposition": f"attachment; filename=isp_backup_{datetime.date.today().isoformat()}.json"})
 
