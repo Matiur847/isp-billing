@@ -123,33 +123,29 @@ def olt_dashboard(request: Request, background_tasks: BackgroundTasks, pon_id: s
         vlan_badge = f'<span class="badge bg-primary fs-6">VLAN {core.h(cur_vlan)}</span>' if cur_vlan != "N/A" else '<span class="badge bg-secondary">N/A</span>'
         prof_sub = f'<div class="small text-muted">{core.h(o.get("line_profile","N/A"))} / {core.h(o.get("service_profile","N/A"))}</div>'
 
-        quick_vlan_btns = ""
-        for pr in presets:
-            is_cur = (pr["linename"] == o.get("line_profile"))
-            btn_cls = "btn-secondary disabled" if is_cur else "btn-outline-success"
-            quick_vlan_btns += f"""
-            <form method="POST" action="/admin/olt/change-vlan" class="d-inline">
+        quick_vlan_btns += f"""
+            <form method="POST" action="/admin/olt/change-vlan" class="d-inline" onsubmit="return ajaxVlanForm(event,this,'{core.h(pr['vlan'])}')">
                 <input type="hidden" name="pon_id" value="{o['pon_id']}"><input type="hidden" name="onu_id" value="{o['onu_id']}">
                 <input type="hidden" name="linename" value="{core.h(pr['linename'])}"><input type="hidden" name="srvname" value="{core.h(pr['srvname'])}">
                 <input type="hidden" name="back_pon" value="{core.h(pon_id)}">
-                <button type="submit" class="btn btn-sm {btn_cls} fw-bold" onclick="return confirm('GPON0/{o['pon_id']}:{o['onu_id']} এর VLAN পরিবর্তন করে {core.h(pr['vlan'])} করবেন?');">VLAN {core.h(pr['vlan'])}</button>
+                <button type="submit" class="btn btn-sm {btn_cls} fw-bold vlan-qbtn" data-vlan="{core.h(pr['vlan'])}">VLAN {core.h(pr['vlan'])}</button>
             </form>"""
 
         search_blob = f"{o['label']} {o['sn']} {o['description']} {o['model']} {cur_vlan} {cust_search_extra}".lower()
         rows_html += f"""
-        <tr class="onu-row" data-search="{core.h(search_blob)}">
+        <tr class="onu-row" id="onu-row-{o['pon_id']}-{o['onu_id']}" data-search="{core.h(search_blob)}">
             <td><div class="fw-bold">{core.h(o['label'])}</div><small class="text-muted">{core.h(o['model'])}</small></td>
             <td>{st_badge}</td>
             <td>{linked_html}</td>
             <td><code>{core.h(o['sn'])}</code><div class="small text-muted">{core.h(o['description'])}</div></td>
-            <td>{vlan_badge}{prof_sub}</td>
+            <td id="vlan-cell-{o['pon_id']}-{o['onu_id']}">{vlan_badge}{prof_sub}</td>
             <td><div class="d-flex flex-wrap gap-1">{quick_vlan_btns}
                 <button type="button" class="btn btn-sm btn-outline-dark" onclick="openVlanModal({o['pon_id']},{o['onu_id']},'{core.h(o.get('line_profile','N/A'))}','{core.h(o.get('service_profile','N/A'))}')">Custom</button>
             </div></td>
             <td class="text-nowrap">
                 <button class="btn btn-sm btn-info text-white fw-bold" onclick="openOpticalModal({o['pon_id']},{o['onu_id']},'{core.h(o['sn'])}')"><i class="fa-solid fa-signal"></i> Power</button>
                 <button class="btn btn-sm btn-outline-primary fw-bold" onclick="openLinkModal({o['pon_id']},{o['onu_id']},'{core.h(o['sn'])}')"><i class="fa-solid fa-link"></i> Link</button>
-                <a href="/admin/olt/reboot?pon_id={o['pon_id']}&onu_id={o['onu_id']}&back_pon={core.h(pon_id)}" onclick="return confirm('এই ONU টি রিবুট করবেন?');" class="btn btn-sm btn-outline-danger"><i class="fa-solid fa-rotate-right"></i></a>
+                <a href="/admin/olt/reboot?pon_id={o['pon_id']}&onu_id={o['onu_id']}&back_pon={core.h(pon_id)}" onclick="return ajaxOltReboot(event,this)" class="btn btn-sm btn-outline-danger"><i class="fa-solid fa-rotate-right"></i></a>
             </td>
         </tr>"""
 
@@ -196,6 +192,40 @@ async function openOpticalModal(p,o,sn){{
     let sb='<span class="badge bg-secondary">Unknown</span>';if(d.rx_dbm!==null&&d.rx_dbm!==undefined){{sb=d.rx_dbm>=-25?'<span class="badge bg-success">ভালো (Good)</span>':(d.rx_dbm>=-27.5?'<span class="badge bg-warning text-dark">দুর্বল হচ্ছে</span>':'<span class="badge bg-danger">খুব দুর্বল / Critical</span>');}}
     b.innerHTML=`<div class="mb-2"><b>ONU:</b> GPON0/${{p}}:${{o}} (${{sn}}) ${{sb}}</div><table class="table table-bordered table-sm mb-0"><tr><th>Rx Power</th><td class="fw-bold text-primary">${{d.rx_power}}</td></tr><tr><th>Tx Power</th><td>${{d.tx_power}}</td></tr><tr><th>Distance</th><td>${{d.distance}}</td></tr><tr><th>Temperature</th><td>${{d.temperature}}</td></tr><tr><th>Voltage / Bias</th><td>${{d.voltage}} / ${{d.bias_current}}</td></tr></table>`;}}catch(e){{b.innerHTML=`<div class="alert alert-danger">${{e}}</div>`;}}
 }}
+function showOltToast(msg,ok=true){{
+    let box=document.getElementById("toastBox");
+    if(!box){{box=document.createElement("div");box.id="toastBox";box.className="position-fixed bottom-0 end-0 p-3";box.style.zIndex="2000";document.body.appendChild(box);}}
+    const el=document.createElement("div");el.className=`alert ${{ok?"alert-success":"alert-danger"}} shadow fw-bold mb-2 py-2 px-3`;
+    el.innerText=(ok?"✅ ":"❌ ")+msg;box.appendChild(el);setTimeout(()=>el.remove(),3000);
+}}
+async function ajaxVlanForm(e,form,vlabel){{
+    e.preventDefault();
+    const pon=form.pon_id.value,onu=form.onu_id.value;
+    if(!confirm(`GPON0/${{pon}}:${{onu}} এর VLAN পরিবর্তন করে ${{vlabel}} করবেন?`))return false;
+    const btn=form.querySelector("button");btn.disabled=true;btn.innerText="...";
+    try{{
+        const res=await fetch(form.action,{{method:"POST",body:new FormData(form),headers:{{"X-Ajax":"1"}}}});
+        const d=await res.json();
+        if(!d.ok){{showOltToast(d.error||"ব্যর্থ!",false);btn.disabled=false;btn.innerText="VLAN "+vlabel;return false;}}
+        showOltToast(d.msg,true);
+        const cell=document.getElementById(`vlan-cell-${{pon}}-${{onu}}`);
+        if(cell)cell.innerHTML=`<span class="badge bg-primary fs-6">VLAN ${{vlabel}}</span><div class="small text-muted">${{d.linename}} / ${{d.srvname}}</div>`;
+        const row=document.getElementById(`onu-row-${{pon}}-${{onu}}`);
+        if(row)row.querySelectorAll(".vlan-qbtn").forEach(b=>{{
+            const isThis=(b.dataset.vlan===vlabel);
+            b.className=isThis?"btn btn-sm btn-secondary disabled fw-bold vlan-qbtn":"btn btn-sm btn-outline-success fw-bold vlan-qbtn";
+            b.disabled=isThis;b.innerText="VLAN "+b.dataset.vlan;
+        }});
+    }}catch(err){{showOltToast("নেটওয়ার্ক ত্রুটি!",false);btn.disabled=false;btn.innerText="VLAN "+vlabel;}}
+    return false;
+}}
+async function ajaxOltReboot(e,el){{
+    e.preventDefault();
+    if(!confirm("এই ONU টি রিবুট করবেন?"))return false;
+    try{{const r=await fetch(el.href,{{headers:{{"X-Ajax":"1"}}}});const d=await r.json();showOltToast(d.ok?d.msg:(d.error||"ব্যর্থ!"),d.ok);}}
+    catch(err){{showOltToast("নেটওয়ার্ক ত্রুটি!",false);}}
+    return false;
+}}
 </script></body></html>"""
 
 
@@ -206,10 +236,13 @@ def olt_change_vlan(request: Request, pon_id: int = Form(...), onu_id: int = For
     try:
         core.get_olt_conn().set_onu_vlan_profile(pon_id, onu_id, linename, srvname)
         core.OLT_CACHE.clear()
+        if request.headers.get("x-ajax") == "1":
+            return JSONResponse({"ok": True, "linename": linename, "srvname": srvname, "msg": f"GPON0/{pon_id}:{onu_id} এর VLAN ({linename}) পরিবর্তন হয়েছে!"})
         return RedirectResponse(url=f"/admin/olt?pon_id={back_pon}&refresh=1&msg=GPON0/{pon_id}:{onu_id}+এর+VLAN+({linename})+সফলভাবে+পরিবর্তন+হয়েছে!", status_code=303)
     except Exception as e:
+        if request.headers.get("x-ajax") == "1":
+            return JSONResponse({"ok": False, "error": str(e)})
         return RedirectResponse(url=f"/admin/olt?pon_id={back_pon}&msg=VLAN+পরিবর্তন+ব্যর্থ:+{e}", status_code=303)
-
 
 @router.get("/api/olt/optical")
 def api_olt_optical(request: Request, pon_id: int, onu_id: int):
@@ -236,6 +269,10 @@ def olt_reboot_onu(request: Request, pon_id: int, onu_id: int, back_pon: str = "
     try:
         core.get_olt_conn().reboot_onu(pon_id, onu_id)
         core.OLT_CACHE.clear()
+        if request.headers.get("x-ajax") == "1":
+            return JSONResponse({"ok": True, "msg": f"GPON0/{pon_id}:{onu_id} রিবুট কমান্ড পাঠানো হয়েছে!"})
         return RedirectResponse(url=f"/admin/olt?pon_id={back_pon}&refresh=1&msg=GPON0/{pon_id}:{onu_id}+রিবুট+কমান্ড+পাঠানো+হয়েছে!", status_code=303)
     except Exception as e:
+        if request.headers.get("x-ajax") == "1":
+            return JSONResponse({"ok": False, "error": str(e)})
         return RedirectResponse(url=f"/admin/olt?pon_id={back_pon}&msg=Reboot+ব্যর্থ:+{e}", status_code=303)
