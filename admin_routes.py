@@ -92,6 +92,7 @@ def admin_dashboard(request: Request, background_tasks: BackgroundTasks, edit_id
         onu_badge = f'<button type="button" class="badge bg-dark text-white border-0 mt-1" onclick="openOpticalModal({olt_pon}, {olt_onuid}, \'{core.h(onu_sn)}\')"><i class="fa-solid fa-signal text-info me-1"></i>PON{olt_pon}:{olt_onuid} ({core.h(onu_sn)})</button>' if olt_pon and olt_onuid else ""
         phone_html = core.h(c["phone"]) if c["phone"] else '<span class="text-muted">No Mobile</span>'
         search_txt = core.h((uname + " " + (c["name"] or "") + " " + (c["phone"] or "") + " " + onu_sn + " " + mac).lower())
+        net_btn = f'<a href="/admin/toggle-suspend/{c["id"]}" class="btn btn-sm btn-outline-danger fw-bold" title="নেট বন্ধ করুন"><i class="fa-solid fa-power-off"></i> Off</a>' if c["status"] == "active" else f'<a href="/admin/toggle-suspend/{c["id"]}" class="btn btn-sm btn-success fw-bold" title="নেট চালু করুন"><i class="fa-solid fa-power-off"></i> On</a>'
 
         cust_rows_html += f"""
         <div class="card mb-2 p-2 border customer-card" data-search="{search_txt}">
@@ -117,7 +118,8 @@ def admin_dashboard(request: Request, background_tasks: BackgroundTasks, edit_id
                     <div class="small text-dark fw-bold mb-1"><i class="fa-solid fa-bangladeshi-taka-sign text-primary"></i> {c['package_price']} TK</div>
                     <div class="small text-secondary"><i class="fa-regular fa-calendar-days text-danger"></i> {exp_fmt}</div>
                 </div>
-                <div class="col-auto ms-auto">
+                <div class="col-auto ms-auto d-flex align-items-center gap-2">
+                    {net_btn}
                     <button type="button" class="btn btn-outline-primary rounded-circle p-0 d-flex align-items-center justify-content-center" style="width:42px;height:42px;"
                         data-id="{c['id']}" data-name="{dname}" data-username="{core.h(uname)}" data-status="{core.h(c['status'])}"
                         data-mac="{core.h(act.get('caller_id', '') if is_online else '')}" data-bound="{core.h(c.get('mac_address') or '')}"
