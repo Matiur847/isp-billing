@@ -1,21 +1,46 @@
 import socket
+import ssl
 import hashlib
 import binascii
 import logging
 
 logger = logging.getLogger("mikrotik")
 
-class MikrotikAPI:
-    def __init__(self, host, port=8728, user="admin", password=""):
+
+class BaseRouterDriver:
+    def __init__(self, host, port, user="admin", password=""):
         self.host = host
         self.port = int(port)
         self.user = user
         self.password = password
+
+    def connect(self): raise NotImplementedError
+    def close(self): raise NotImplementedError
+    def test_connection(self): raise NotImplementedError
+    def get_active_pppoe(self): raise NotImplementedError
+    def get_all_secrets(self): raise NotImplementedError
+    def get_profiles(self): raise NotImplementedError
+    def get_live_speed(self, username): raise NotImplementedError
+
+
+class MikrotikAPI(BaseRouterDriver):
+    def __init__(self, host, port=8728, user="admin", password="", use_ssl=False):
+        super().__init__(host, port, user, password)
+        self.use_ssl = use_ssl
         self.sock = None
 
     def connect(self):
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.settimeout(10.0)
+        if not self.host:
+            raise ValueError("MikroTik host is not configured")
+        raw_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        raw_sock.settimeout(10.0)
+        if self.use_ssl:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            self.sock = ctx.wrap_socket(raw_sock, server_hostname=self.host)
+        else:
+            self.sock = raw_sock
         self.sock.connect((self.host, self.port))
         self._login()
 
@@ -42,8 +67,7 @@ class MikrotikAPI:
         if (c & 0x80) == 0x00:
             return c
         elif (c & 0xC0) == 0x80:
-            c2 = self.sock.recv(1)[0]
-            return ((c & 0x3F) << 8) | c2
+            return ((c & 0x3F) << 8) | self.sock.recv(1)[0]
         elif (c & 0xE0) == 0xC0:
             c2, c3 = self.sock.recv(2)
             return ((c & 0x1F) << 16) | (c2 << 8) | c3
@@ -89,12 +113,9 @@ class MikrotikAPI:
             for item in sentence[1:]:
                 if item.startswith("="):
                     parts = item[1:].split("=", 1)
-                    if len(parts) == 2:
-                        attrs[parts[0]] = parts[1]
-                    else:
-                        attrs[parts[0]] = ""
+                    attrs[parts[0]] = parts[1] if len(parts) == 2 else ""
             replies.append((status, attrs))
-            if status == "!done" or status == "!trap" or status == "!fatal":
+            if status in ("!done", "!trap", "!fatal"):
                 break
         return replies
 
@@ -128,57 +149,109 @@ class MikrotikAPI:
                 pass
             self.sock = None
 
-    # --- Live PPPoE Monitoring with Usage & MAC ---
+    def test_connection(self):
+        res = self.talk(["/system/identity/print"])
+        identity = "MikroTik"
+        for status, attrs in res:
+            if status == "!re":
+                identity = attrs.get("name", "MikroTik")
+        res_r = self.talk(["/system/resource/print"])
+        board, version = "", ""
+        for status, attrs in res_r:
+            if status == "!re":
+                board = attrs.get("board-name", "")
+                version = attrs.get("version", "")
+        return {"ok": True, "identity": identity, "board": board, "version": version}
+
     def get_active_pppoe(self):
-        """Returns dict of active PPPoE sessions with IP, Uptime, MAC, and Data Usage (GB)"""
         res = self.talk(["/ppp/active/print"])
+        iface_bytes = {}
+        try:
+            ires = self.talk(["/interface/print", "?type=pppoe-in"])
+            for st, at in ires:
+                if st == "!re":
+                    iname = at.get("name", "")
+                    rx_b = int(at.get("rx-byte", 0) or 0)
+                    tx_b = int(at.get("tx-byte", 0) or 0)
+                    iface_bytes[iname] = round((rx_b + tx_b) / (1024 ** 3), 2)
+        except Exception:
+            pass
+
         users = {}
         for status, attrs in res:
             if status == "!re":
                 name = attrs.get("name")
                 if name:
+                    usage_gb = iface_bytes.get(f"<pppoe-{name}>", iface_bytes.get(name, 0.0))
                     users[name] = {
                         "address": attrs.get("address", "0.0.0.0"),
                         "uptime": attrs.get("uptime", "0s"),
                         "id": attrs.get(".id", ""),
                         "caller_id": attrs.get("caller-id", "No MAC"),
-                        "session_id": attrs.get("session-id", "")
+                        "session_id": attrs.get("session-id", ""),
+                        "usage_gb": usage_gb,
                     }
         return users
 
+    def get_all_secrets(self):
+        res = self.talk(["/ppp/secret/print"])
+        secrets_list = []
+        for status, attrs in res:
+            if status == "!re" and attrs.get("name"):
+                secrets_list.append({
+                    "id": attrs.get(".id", ""),
+                    "name": attrs.get("name"),
+                    "password": attrs.get("password", "123456"),
+                    "profile": attrs.get("profile", "default"),
+                    "service": attrs.get("service", "pppoe"),
+                    "caller_id": attrs.get("caller-id", ""),
+                    "disabled": attrs.get("disabled", "false") == "true",
+                    "comment": attrs.get("comment", ""),
+                })
+        return secrets_list
+
+    def get_profiles(self):
+        res = self.talk(["/ppp/profile/print"])
+        profiles = []
+        for status, attrs in res:
+            if status == "!re" and attrs.get("name"):
+                profiles.append(attrs["name"])
+        return profiles or ["default"]
+
     def get_live_speed(self, username):
-        """Measures live RX (Download) and TX (Upload) speed in Mbps for a user interface"""
-        # Dynamic interface is named <pppoe-username>
+        # RouterOS <pppoe-user>: tx = router->customer (Download), rx = customer->router (Upload)
         iface_candidates = [f"<pppoe-{username}>", username]
-        speed_data = {"rx_mbps": 0.0, "tx_mbps": 0.0, "online": False}
+        speed_data = {"rx_mbps": 0.0, "tx_mbps": 0.0, "download_mbps": 0.0, "upload_mbps": 0.0, "online": False}
         for iface in iface_candidates:
             res = self.talk(["/interface/monitor-traffic", f"=interface={iface}", "=once="])
             for status, attrs in res:
                 if status == "!re":
-                    rx_bps = int(attrs.get("rx-bits-per-second", 0))
-                    tx_bps = int(attrs.get("tx-bits-per-second", 0))
-                    speed_data["rx_mbps"] = round(rx_bps / 1_000_000, 2)
-                    speed_data["tx_mbps"] = round(tx_bps / 1_000_000, 2)
-                    speed_data["online"] = True
-                    return speed_data
+                    tx_bps = int(attrs.get("tx-bits-per-second", 0) or 0)
+                    rx_bps = int(attrs.get("rx-bits-per-second", 0) or 0)
+                    dl = round(tx_bps / 1_000_000, 2)
+                    ul = round(rx_bps / 1_000_000, 2)
+                    return {
+                        "rx_mbps": dl,   # Frontend Download box compatibility
+                        "tx_mbps": ul,   # Frontend Upload box compatibility
+                        "download_mbps": dl,
+                        "upload_mbps": ul,
+                        "online": True,
+                    }
         return speed_data
 
     def kick_user(self, username):
         actives = self.get_active_pppoe()
         if username in actives:
-            active_id = actives[username]["id"]
-            self.talk(["/ppp/active/remove", f"=.id={active_id}"])
+            self.talk(["/ppp/active/remove", f"=.id={actives[username]['id']}"])
             logger.info(f"Kicked active session for {username}")
             return True
         return False
 
     def create_pppoe_secret(self, username, password, profile="default", comment=""):
         res = self.talk(["/ppp/secret/print", f"?name={username}"])
-        exists = any(status == "!re" for status, attrs in res)
-        if exists:
+        if any(status == "!re" for status, _ in res):
             return self.update_pppoe_secret(username, password, profile, comment)
-        
-        words = ["/ppp/secret/add", f"=name={username}", f"=password={password}", f"=service=pppoe", f"=profile={profile}"]
+        words = ["/ppp/secret/add", f"=name={username}", f"=password={password}", "=service=pppoe", f"=profile={profile}"]
         if comment:
             words.append(f"=comment={comment}")
         self.talk(words)
@@ -186,14 +259,9 @@ class MikrotikAPI:
 
     def update_pppoe_secret(self, username, password=None, profile=None, comment=None):
         res = self.talk(["/ppp/secret/print", f"?name={username}"])
-        secret_id = None
-        for status, attrs in res:
-            if status == "!re":
-                secret_id = attrs.get(".id")
-                break
+        secret_id = next((attrs.get(".id") for st, attrs in res if st == "!re"), None)
         if not secret_id:
             return False
-            
         words = ["/ppp/secret/set", f"=.id={secret_id}"]
         if password:
             words.append(f"=password={password}")
@@ -201,17 +269,31 @@ class MikrotikAPI:
             words.append(f"=profile={profile}")
         if comment is not None:
             words.append(f"=comment={comment}")
-            
         self.talk(words)
+        return True
+
+    def set_secret_disabled(self, username, disabled=True):
+        res = self.talk(["/ppp/secret/print", f"?name={username}"])
+        secret_id = next((attrs.get(".id") for st, attrs in res if st == "!re"), None)
+        if not secret_id:
+            return False
+        val = "yes" if disabled else "no"
+        self.talk(["/ppp/secret/set", f"=.id={secret_id}", f"=disabled={val}"])
+        if disabled:
+            self.kick_user(username)
+        return True
+
+    def bind_mac(self, username, mac_address):
+        res = self.talk(["/ppp/secret/print", f"?name={username}"])
+        secret_id = next((attrs.get(".id") for st, attrs in res if st == "!re"), None)
+        if not secret_id:
+            return False
+        self.talk(["/ppp/secret/set", f"=.id={secret_id}", f"=caller-id={mac_address}"])
         return True
 
     def delete_pppoe_secret(self, username):
         res = self.talk(["/ppp/secret/print", f"?name={username}"])
-        secret_id = None
-        for status, attrs in res:
-            if status == "!re":
-                secret_id = attrs.get(".id")
-                break
+        secret_id = next((attrs.get(".id") for st, attrs in res if st == "!re"), None)
         if secret_id:
             self.talk(["/ppp/secret/remove", f"=.id={secret_id}"])
             self.kick_user(username)
@@ -219,9 +301,10 @@ class MikrotikAPI:
         return False
 
     def block_user(self, ip_address, comment="Expired-Billing"):
+        if not ip_address or ip_address == "0.0.0.0":
+            return
         res = self.talk(["/ip/firewall/address-list/print", "?list=Expired-Users", f"?address={ip_address}"])
-        exists = any(status == "!re" for status, attrs in res)
-        if not exists:
+        if not any(status == "!re" for status, _ in res):
             self.talk(["/ip/firewall/address-list/add", "=list=Expired-Users", f"=address={ip_address}", f"=comment={comment}"])
 
     def unblock_user(self, ip_address):
@@ -230,14 +313,42 @@ class MikrotikAPI:
             if status == "!re" and ".id" in attrs:
                 self.talk(["/ip/firewall/address-list/remove", f"=.id={attrs['.id']}"])
 
+    def block_customer(self, username, ip_address=None, mode="address_list"):
+        if mode in ("address_list", "both"):
+            if not ip_address:
+                actives = self.get_active_pppoe()
+                if username in actives:
+                    ip_address = actives[username]["address"]
+            if ip_address:
+                self.block_user(ip_address, comment=username)
+        if mode in ("disable_secret", "both"):
+            self.set_secret_disabled(username, disabled=True)
+
     def unblock_user_by_name(self, username):
+        self.set_secret_disabled(username, disabled=False)
         actives = self.get_active_pppoe()
+        ip = None
         if username in actives:
             ip = actives[username]["address"]
             self.unblock_user(ip)
-            return ip
         res = self.talk(["/ip/firewall/address-list/print", "?list=Expired-Users", f"?comment={username}"])
         for status, attrs in res:
             if status == "!re" and ".id" in attrs:
                 self.talk(["/ip/firewall/address-list/remove", f"=.id={attrs['.id']}"])
-        return None
+        return ip
+
+
+class MikrotikSSLAPI(MikrotikAPI):
+    def __init__(self, host, port=8729, user="admin", password=""):
+        super().__init__(host, port, user, password, use_ssl=True)
+
+
+ROUTER_DRIVERS = {
+    "mikrotik_api": MikrotikAPI,
+    "mikrotik_api_ssl": MikrotikSSLAPI,
+}
+
+
+def get_router_driver(driver_name, host, port, user, password) -> BaseRouterDriver:
+    cls = ROUTER_DRIVERS.get(driver_name, MikrotikAPI)
+    return cls(host=host, port=port, user=user, password=password)
