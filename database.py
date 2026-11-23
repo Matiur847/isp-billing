@@ -2,165 +2,216 @@ import sqlite3
 import datetime
 import os
 import re
+import json
+import secrets
 
+try:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+except ImportError:
+    psycopg2 = None
+
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
+IS_POSTGRES = DATABASE_URL.startswith("postgresql://") and psycopg2 is not None
 DB_PATH = os.environ.get("DB_PATH", "billing.db")
 
+INTEGRITY_ERRORS = (sqlite3.IntegrityError,) + ((psycopg2.IntegrityError,) if psycopg2 else ())
+
+
 def get_db():
+    if IS_POSTGRES:
+        conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+        return conn
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
+
+def _q(sql: str) -> str:
+    return sql.replace("?", "%s") if IS_POSTGRES else sql
+
+
+def _fetchone_dict(cur):
+    row = cur.fetchone()
+    return dict(row) if row else None
+
+
+def _fetchall_dicts(cur):
+    return [dict(r) for r in cur.fetchall()]
+
+
 def clean_friendly_name(username: str) -> str:
-    # E.g.: MR@obaidul -> Obaidul, Anisur97 -> Anisur, Primary-school -> Primary School
     u = username.strip()
     if u.lower().startswith("mr@"):
         clean = u[3:]
     elif u.lower().startswith("mrf"):
         clean = "MRF " + u[3:]
     else:
-        # Strip trailing numbers
         clean = re.sub(r'\d+$', '', u)
         clean = clean.replace("-", " ").replace("_", " ")
-        
-    clean = clean.strip().capitalize()
-    
-    # Specific map for exact beauty
-    custom_names = {
-        "anisur97": "Anisur",
-        "azam55": "Azam",
-        "babu85": "Babu",
-        "mr@obaidul": "Obaidul",
-        "mr@sarul": "Sarul",
-        "mrf11": "MRF 11",
-        "mrf15j": "MRF 15J",
-        "mrf107": "MRF 107",
-        "mrf117": "MRF 117",
-        "mrf141": "MRF 141",
-        "mrf200s": "MRF 200S",
-        "mamidul01": "Mamidul",
-        "mizan": "Mizan",
-        "moynul": "Moynul",
-        "owab1234": "Owab",
-        "primary-school": "Primary School",
-        "rafi81": "Rafi",
-        "romana005": "Romana",
-        "sahinur-74": "Sahinur",
-        "shofik1": "Shofik",
-        "juyel1": "Juyel"
-    }
-    return custom_names.get(username.lower(), clean)
+    return clean.strip().capitalize() or username
+
 
 def init_db():
     conn = get_db()
     cur = conn.cursor()
-    
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS customers (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT UNIQUE NOT NULL,
-        password TEXT DEFAULT '123456',
-        name TEXT DEFAULT '',
-        phone TEXT DEFAULT '',
-        package_name TEXT DEFAULT '25 Mbps',
-        package_price INTEGER DEFAULT 525,
-        profile TEXT DEFAULT 'default',
-        expiry_date TEXT,
-        status TEXT DEFAULT 'active',
-        created_at TEXT
-    )
-    """)
-    
-    columns = [
-        ("password", "TEXT DEFAULT '123456'"),
-        ("name", "TEXT DEFAULT ''"),
-        ("phone", "TEXT DEFAULT ''"),
-        ("profile", "TEXT DEFAULT 'default'"),
-        ("created_at", "TEXT")
-    ]
-    for col, col_type in columns:
-        try:
-            cur.execute(f"ALTER TABLE customers ADD COLUMN {col} {col_type}")
-        except Exception:
-            pass
-            
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS payments (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        trx_id TEXT UNIQUE NOT NULL,
-        amount REAL NOT NULL,
-        sender_phone TEXT,
-        raw_sms TEXT,
-        received_at TEXT,
-        used_by TEXT,
-        used_at TEXT,
-        status TEXT DEFAULT 'unused'
-    )
-    """)
-    
+
+    if IS_POSTGRES:
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS customers (
+            id SERIAL PRIMARY KEY,
+            username TEXT UNIQUE NOT NULL,
+            password TEXT DEFAULT '123456',
+            name TEXT DEFAULT '',
+            phone TEXT DEFAULT '',
+            package_name TEXT DEFAULT '25 Mbps',
+            package_price INTEGER DEFAULT 525,
+            profile TEXT DEFAULT 'default',
+            expiry_date TEXT,
+            status TEXT DEFAULT 'active',
+            mac_address TEXT DEFAULT '',
+            olt_pon INTEGER DEFAULT 0,
+            olt_onuid INTEGER DEFAULT 0,
+            onu_sn TEXT DEFAULT '',
+            created_at TEXT
+        )
+        """)
+        for col, col_type in [
+            ("mac_address", "TEXT DEFAULT ''"),
+            ("olt_pon", "INTEGER DEFAULT 0"),
+            ("olt_onuid", "INTEGER DEFAULT 0"),
+            ("onu_sn", "TEXT DEFAULT ''"),
+        ]:
+            cur.execute(f"ALTER TABLE customers ADD COLUMN IF NOT EXISTS {col} {col_type}")
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS payments (
+            id SERIAL PRIMARY KEY,
+            trx_id TEXT UNIQUE NOT NULL,
+            amount REAL NOT NULL,
+            sender_phone TEXT,
+            raw_sms TEXT,
+            received_at TEXT,
+            used_by TEXT,
+            used_at TEXT,
+            status TEXT DEFAULT 'unused'
+        )
+        """)
+    else:
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS customers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password TEXT DEFAULT '123456',
+            name TEXT DEFAULT '',
+            phone TEXT DEFAULT '',
+            package_name TEXT DEFAULT '25 Mbps',
+            package_price INTEGER DEFAULT 525,
+            profile TEXT DEFAULT 'default',
+            expiry_date TEXT,
+            status TEXT DEFAULT 'active',
+            mac_address TEXT DEFAULT '',
+            olt_pon INTEGER DEFAULT 0,
+            olt_onuid INTEGER DEFAULT 0,
+            onu_sn TEXT DEFAULT '',
+            created_at TEXT
+        )
+        """)
+        for col, col_type in [
+            ("password", "TEXT DEFAULT '123456'"),
+            ("name", "TEXT DEFAULT ''"),
+            ("phone", "TEXT DEFAULT ''"),
+            ("profile", "TEXT DEFAULT 'default'"),
+            ("mac_address", "TEXT DEFAULT ''"),
+            ("olt_pon", "INTEGER DEFAULT 0"),
+            ("olt_onuid", "INTEGER DEFAULT 0"),
+            ("onu_sn", "TEXT DEFAULT ''"),
+            ("created_at", "TEXT"),
+        ]:
+            try:
+                cur.execute(f"ALTER TABLE customers ADD COLUMN {col} {col_type}")
+            except Exception:
+                pass
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS payments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trx_id TEXT UNIQUE NOT NULL,
+            amount REAL NOT NULL,
+            sender_phone TEXT,
+            raw_sms TEXT,
+            received_at TEXT,
+            used_by TEXT,
+            used_at TEXT,
+            status TEXT DEFAULT 'unused'
+        )
+        """)
+
     cur.execute("""
     CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY,
         value TEXT
     )
     """)
-    
+
     default_settings = {
-        "bkash_number": "01859734056",
-        "company_name": "সাইফুল ডিস এন্ড ইন্টারনেট 🛜",
-        "admin_password": "admin",
-        "mikrotik_host": "remote1.dslabbd.com",
-        "mikrotik_port": "35105",
-        "mikrotik_user": "admin",
-        "mikrotik_pass": "matiur847@#"
+        "bkash_number": os.environ.get("BKASH_NUMBER", "01XXXXXXXXX"),
+        "company_name": os.environ.get("COMPANY_NAME", "সাইফুল ডিস এন্ড ইন্টারনেট 🛜"),
+        "admin_password": os.environ.get("ADMIN_PASSWORD", "admin123"),
+        "session_secret": os.environ.get("SESSION_SECRET", secrets.token_hex(32)),
+        "router_driver": os.environ.get("ROUTER_DRIVER", "mikrotik_api"),
+        "mikrotik_host": os.environ.get("MIKROTIK_HOST", ""),
+        "mikrotik_port": os.environ.get("MIKROTIK_PORT", "8728"),
+        "mikrotik_user": os.environ.get("MIKROTIK_USER", "admin"),
+        "mikrotik_pass": os.environ.get("MIKROTIK_PASS", ""),
+        "block_mode": os.environ.get("BLOCK_MODE", "address_list"),
+        "olt_driver": os.environ.get("OLT_DRIVER", "vsol_gpon_web"),
+        "olt_url": os.environ.get("OLT_URL", ""),
+        "olt_user": os.environ.get("OLT_USER", "admin"),
+        "olt_pass": os.environ.get("OLT_PASS", ""),
     }
+
     for k, v in default_settings.items():
-        cur.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (k, v))
-        
-    # Pre-seed or update all 21 users with their clean, friendly names
-    default_users = [
-        ("Anisur97", "default"), ("Azam55", "default"), ("Babu85", "default"), 
-        ("MR@obaidul", "default"), ("MR@sarul", "default"), ("MRF11", "default"), ("MRF15J", "default"),
-        ("MRF107", "Profile-Line2"), ("MRF117", "Profile-Line2"), ("MRF141", "Profile-Line2"), 
-        ("MRF200S", "Profile-Line2"), ("Mamidul01", "Profile-Line2"), ("Mizan", "Profile-Line2"), ("Moynul", "Profile-Line2"),
-        ("Owab1234", "Profile-Line3"), ("Primary-school", "Profile-Line3"), ("Rafi81", "Profile-Line3"), 
-        ("Romana005", "Profile-Line3"), ("Sahinur-74", "Profile-Line3"), ("Shofik1", "Profile-Line3"), ("juyel1", "Profile-Line3")
-    ]
-    
-    now = datetime.datetime.now()
-    next_month = (now + datetime.timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
-    now_str = now.strftime("%Y-%m-%d %H:%M:%S")
-    
-    for u, prof in default_users:
-        friendly = clean_friendly_name(u)
-        cur.execute("SELECT id, name FROM customers WHERE username = ?", (u,))
-        row = cur.fetchone()
-        if not row:
-            cur.execute("""
-            INSERT INTO customers (username, password, name, package_name, package_price, profile, expiry_date, status, created_at)
-            VALUES (?, '123456', ?, '25 Mbps', 525, ?, ?, 'active', ?)
-            """, (u, friendly, prof, next_month, now_str))
-        else:
-            # Update name if empty or matches username
-            if not row["name"] or row["name"] == u:
-                cur.execute("UPDATE customers SET name = ?, package_name = '25 Mbps', package_price = 525, profile = ? WHERE username = ?", (friendly, prof, u))
-            
+        cur.execute(
+            _q("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING"),
+            (k, str(v))
+        )
+
     conn.commit()
     conn.close()
 
-def get_setting(key, default=""):
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT value FROM settings WHERE key = ?", (key,))
-    row = cur.fetchone()
-    conn.close()
-    return row["value"] if row else default
 
-def set_setting(key, value):
+def get_setting(key: str, default: str = "") -> str:
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
+    cur.execute(_q("SELECT value FROM settings WHERE key = ?"), (key,))
+    row = _fetchone_dict(cur)
+    conn.close()
+    return row["value"] if row and row["value"] is not None else default
+
+
+def set_setting(key: str, value: str):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        _q("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"),
+        (key, str(value))
+    )
     conn.commit()
     conn.close()
+
+
+def get_all_settings() -> dict:
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT key, value FROM settings")
+    rows = _fetchall_dicts(cur)
+    conn.close()
+    return {r["key"]: r["value"] for r in rows}
+
 
 def record_payment(trx_id, amount, sender_phone, raw_sms):
     trx_id = trx_id.strip().upper()
@@ -168,16 +219,30 @@ def record_payment(trx_id, amount, sender_phone, raw_sms):
     cur = conn.cursor()
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
-        cur.execute("""
-        INSERT INTO payments (trx_id, amount, sender_phone, raw_sms, received_at, status)
-        VALUES (?, ?, ?, ?, ?, 'unused')
-        """, (trx_id, amount, sender_phone, raw_sms, now))
+        cur.execute(
+            _q("""
+            INSERT INTO payments (trx_id, amount, sender_phone, raw_sms, received_at, status)
+            VALUES (?, ?, ?, ?, ?, 'unused')
+            """),
+            (trx_id, float(amount), sender_phone, raw_sms, now)
+        )
         conn.commit()
         success = True
-    except sqlite3.IntegrityError:
+    except INTEGRITY_ERRORS:
+        conn.rollback()
         success = False
     conn.close()
     return success
+
+
+def get_recent_payments(limit=30):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(_q("SELECT * FROM payments ORDER BY id DESC LIMIT ?"), (int(limit),))
+    rows = _fetchall_dicts(cur)
+    conn.close()
+    return rows
+
 
 def search_customers(query, limit=10):
     query = query.strip()
@@ -185,42 +250,78 @@ def search_customers(query, limit=10):
         return []
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("""
-    SELECT id, username, name, phone, package_name, package_price, status 
-    FROM customers 
-    WHERE LOWER(username) LIKE LOWER(?) 
-       OR phone LIKE ? 
-       OR LOWER(name) LIKE LOWER(?)
-    ORDER BY name ASC
-    LIMIT ?
-    """, (f"%{query}%", f"%{query}%", f"%{query}%", limit))
-    rows = cur.fetchall()
+    like_q = f"%{query}%"
+    cur.execute(
+        _q("""
+        SELECT id, username, name, phone, package_name, package_price, status
+        FROM customers
+        WHERE LOWER(username) LIKE LOWER(?)
+           OR phone LIKE ?
+           OR LOWER(name) LIKE LOWER(?)
+           OR LOWER(onu_sn) LIKE LOWER(?)
+        ORDER BY name ASC
+        LIMIT ?
+        """),
+        (like_q, like_q, like_q, like_q, int(limit))
+    )
+    rows = _fetchall_dicts(cur)
     conn.close()
-    return [dict(r) for r in rows]
+    return rows
+
 
 def get_all_customers():
     conn = get_db()
     cur = conn.cursor()
     cur.execute("SELECT * FROM customers ORDER BY expiry_date ASC")
-    rows = cur.fetchall()
+    rows = _fetchall_dicts(cur)
     conn.close()
-    return [dict(r) for r in rows]
+    return rows
+
 
 def get_customer_by_id(cust_id):
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM customers WHERE id = ?", (cust_id,))
-    row = cur.fetchone()
+    cur.execute(_q("SELECT * FROM customers WHERE id = ?"), (int(cust_id),))
+    row = _fetchone_dict(cur)
     conn.close()
-    return dict(row) if row else None
+    return row
+
 
 def get_customer_by_username(username):
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM customers WHERE LOWER(username) = LOWER(?)", (username.strip(),))
-    row = cur.fetchone()
+    cur.execute(_q("SELECT * FROM customers WHERE LOWER(username) = LOWER(?)"), (username.strip(),))
+    row = _fetchone_dict(cur)
     conn.close()
-    return dict(row) if row else None
+    return row
+
+
+def get_expired_active_customers():
+    conn = get_db()
+    cur = conn.cursor()
+    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cur.execute(_q("SELECT * FROM customers WHERE expiry_date < ? AND status = 'active'"), (now_str,))
+    rows = _fetchall_dicts(cur)
+    conn.close()
+    return rows
+
+
+def get_all_expired_usernames():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT username FROM customers WHERE status = 'expired'")
+    rows = _fetchall_dicts(cur)
+    conn.close()
+    return {r["username"] for r in rows}
+
+
+def mark_customer_expired(username):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(_q("UPDATE customers SET status = 'expired' WHERE username = ?"), (username,))
+    conn.commit()
+    conn.close()
+
 
 def create_customer(username, password, name, phone, package_name, package_price, profile, days_valid=30):
     username = username.strip()
@@ -231,52 +332,121 @@ def create_customer(username, password, name, phone, package_name, package_price
     expiry = (now + datetime.timedelta(days=int(days_valid))).strftime("%Y-%m-%d %H:%M:%S")
     now_str = now.strftime("%Y-%m-%d %H:%M:%S")
     try:
-        cur.execute("""
-        INSERT INTO customers (username, password, name, phone, package_name, package_price, profile, expiry_date, status, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)
-        """, (username, password.strip(), friendly, phone.strip(), package_name.strip(), int(package_price), profile.strip(), expiry, now_str))
+        cur.execute(
+            _q("""
+            INSERT INTO customers (username, password, name, phone, package_name, package_price, profile, expiry_date, status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)
+            """),
+            (username, password.strip(), friendly, phone.strip(), package_name.strip(), int(package_price), profile.strip(), expiry, now_str)
+        )
         conn.commit()
-        success = True
-        err = ""
-    except sqlite3.IntegrityError:
-        success = False
-        err = f"Username '{username}' already exists!"
+        success, err = True, ""
+    except INTEGRITY_ERRORS:
+        conn.rollback()
+        success, err = False, f"Username '{username}' already exists!"
     conn.close()
     return success, err
+
+
+def upsert_synced_secrets(secrets_list):
+    """MikroTik থেকে সব PPPoE ইউজার Import করে (আগে থাকলে ডুপ্লিকেট করে না)"""
+    conn = get_db()
+    cur = conn.cursor()
+    now = datetime.datetime.now()
+    next_month = (now + datetime.timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
+    now_str = now.strftime("%Y-%m-%d %H:%M:%S")
+    added = 0
+    for s in secrets_list:
+        uname = (s.get("name") or "").strip()
+        if not uname:
+            continue
+        cur.execute(_q("SELECT id FROM customers WHERE LOWER(username) = LOWER(?)"), (uname,))
+        if cur.fetchone():
+            continue
+        pwd = s.get("password", "123456")
+        prof = s.get("profile", "default")
+        mac = s.get("caller_id", "")
+        status = "expired" if s.get("disabled") else "active"
+        friendly = clean_friendly_name(uname)
+        cur.execute(
+            _q("""
+            INSERT INTO customers (username, password, name, package_name, package_price, profile, expiry_date, status, mac_address, created_at)
+            VALUES (?, ?, ?, '25 Mbps', 525, ?, ?, ?, ?, ?)
+            """),
+            (uname, pwd, friendly, prof, next_month, status, mac, now_str)
+        )
+        added += 1
+    conn.commit()
+    conn.close()
+    return added
+
 
 def update_customer_full(cust_id, name, phone, password, package_name, package_price, profile, expiry_date, status):
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("""
-    UPDATE customers 
-    SET name = ?, phone = ?, password = ?, package_name = ?, package_price = ?, profile = ?, expiry_date = ?, status = ?
-    WHERE id = ?
-    """, (name.strip(), phone.strip(), password.strip(), package_name.strip(), int(package_price), profile.strip(), expiry_date.strip(), status, cust_id))
+    cur.execute(
+        _q("""
+        UPDATE customers
+        SET name = ?, phone = ?, password = ?, package_name = ?, package_price = ?, profile = ?, expiry_date = ?, status = ?
+        WHERE id = ?
+        """),
+        (
+            (name or "").strip(),
+            (phone or "").strip(),
+            (password or "").strip(),
+            (package_name or "25 Mbps").strip(),
+            int(package_price),
+            (profile or "default").strip(),
+            (expiry_date or "").strip(),
+            status,
+            int(cust_id),
+        )
+    )
     conn.commit()
     conn.close()
+
+
+def update_customer_mac(cust_id, mac_address):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(_q("UPDATE customers SET mac_address = ? WHERE id = ?"), ((mac_address or "").strip(), int(cust_id)))
+    conn.commit()
+    conn.close()
+
+
+def link_customer_onu(cust_id, pon_id, onu_id, onu_sn=""):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        _q("UPDATE customers SET olt_pon = ?, olt_onuid = ?, onu_sn = ? WHERE id = ?"),
+        (int(pon_id), int(onu_id), (onu_sn or "").strip(), int(cust_id))
+    )
+    conn.commit()
+    conn.close()
+
 
 def delete_customer(cust_id):
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("SELECT username FROM customers WHERE id = ?", (cust_id,))
-    row = cur.fetchone()
+    cur.execute(_q("SELECT username FROM customers WHERE id = ?"), (int(cust_id),))
+    row = _fetchone_dict(cur)
     username = row["username"] if row else None
     if username:
-        cur.execute("DELETE FROM customers WHERE id = ?", (cust_id,))
+        cur.execute(_q("DELETE FROM customers WHERE id = ?"), (int(cust_id),))
         conn.commit()
     conn.close()
     return username
 
+
 def extend_customer(cust_id, days=30):
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM customers WHERE id = ?", (cust_id,))
-    row = cur.fetchone()
-    if not row:
+    cur.execute(_q("SELECT * FROM customers WHERE id = ?"), (int(cust_id),))
+    cust = _fetchone_dict(cur)
+    if not cust:
         conn.close()
         return None, None
-        
-    cust = dict(row)
+
     now = datetime.datetime.now()
     try:
         if len(cust["expiry_date"]) == 10:
@@ -285,46 +455,43 @@ def extend_customer(cust_id, days=30):
             curr_expiry = datetime.datetime.strptime(cust["expiry_date"][:19], "%Y-%m-%d %H:%M:%S")
     except Exception:
         curr_expiry = now
-        
-    if curr_expiry >= now:
-        new_expiry = curr_expiry + datetime.timedelta(days=int(days))
-    else:
-        new_expiry = now + datetime.timedelta(days=int(days))
-        
+
+    new_expiry = (curr_expiry if curr_expiry >= now else now) + datetime.timedelta(days=int(days))
     new_expiry_str = new_expiry.strftime("%Y-%m-%d %H:%M:%S")
-    cur.execute("UPDATE customers SET expiry_date = ?, status = 'active' WHERE id = ?", (new_expiry_str, cust_id))
+    cur.execute(_q("UPDATE customers SET expiry_date = ?, status = 'active' WHERE id = ?"), (new_expiry_str, int(cust_id)))
     conn.commit()
     conn.close()
     return cust["username"], new_expiry_str
+
 
 def verify_and_apply_payment(username_or_id, trx_id):
     trx_id = trx_id.strip().upper()
     conn = get_db()
     cur = conn.cursor()
-    
-    cur.execute("SELECT * FROM customers WHERE LOWER(username) = LOWER(?) OR id = ?", (str(username_or_id).strip(), str(username_or_id).strip()))
-    cust = cur.fetchone()
+
+    if str(username_or_id).strip().isdigit():
+        cur.execute(_q("SELECT * FROM customers WHERE LOWER(username) = LOWER(?) OR id = ?"), (str(username_or_id).strip(), int(username_or_id)))
+    else:
+        cur.execute(_q("SELECT * FROM customers WHERE LOWER(username) = LOWER(?)"), (str(username_or_id).strip(),))
+    cust = _fetchone_dict(cur)
     if not cust:
         conn.close()
         return False, "কাস্টমার পাওয়া যায়নি! সঠিক ইউজার আইডি বা নাম দিন।"
-        
-    cust = dict(cust)
-    
-    cur.execute("SELECT * FROM payments WHERE trx_id = ?", (trx_id,))
-    payment = cur.fetchone()
+
+    cur.execute(_q("SELECT * FROM payments WHERE trx_id = ?"), (trx_id,))
+    payment = _fetchone_dict(cur)
     if not payment:
         conn.close()
         return False, "এই TrxID দিয়ে কোনো পেমেন্ট পাওয়া যায়নি! টাকা পাঠানোর ১-২ মিনিট পর আবার ট্রাই করুন।"
-        
-    payment = dict(payment)
+
     if payment["status"] != "unused":
         conn.close()
         return False, f"এই TrxID টি ইতিমধ্যে ব্যবহার করা হয়েছে ({payment['used_by']})!"
-        
-    if payment["amount"] < cust["package_price"]:
+
+    if float(payment["amount"]) < float(cust["package_price"]):
         conn.close()
         return False, f"টাকার পরিমাণ কম! আপনার প্যাকেজের বিল {cust['package_price']} টাকা, কিন্তু পেমেন্ট এসেছে {payment['amount']} টাকা।"
-        
+
     now = datetime.datetime.now()
     try:
         if len(cust["expiry_date"]) == 10:
@@ -333,53 +500,118 @@ def verify_and_apply_payment(username_or_id, trx_id):
             curr_expiry = datetime.datetime.strptime(cust["expiry_date"][:19], "%Y-%m-%d %H:%M:%S")
     except Exception:
         curr_expiry = now
-        
-    if curr_expiry >= now:
-        new_expiry = curr_expiry + datetime.timedelta(days=30)
-    else:
-        new_expiry = now + datetime.timedelta(days=30)
-        
+
+    new_expiry = (curr_expiry if curr_expiry >= now else now) + datetime.timedelta(days=30)
     new_expiry_str = new_expiry.strftime("%Y-%m-%d %H:%M:%S")
     now_str = now.strftime("%Y-%m-%d %H:%M:%S")
-    
-    cur.execute("""
-    UPDATE payments SET status = 'used', used_by = ?, used_at = ? WHERE id = ?
-    """, (cust["username"], now_str, payment["id"]))
-    
-    cur.execute("""
-    UPDATE customers SET expiry_date = ?, status = 'active' WHERE id = ?
-    """, (new_expiry_str, cust["id"]))
-    
+
+    cur.execute(_q("UPDATE payments SET status = 'used', used_by = ?, used_at = ? WHERE id = ?"), (cust["username"], now_str, payment["id"]))
+    cur.execute(_q("UPDATE customers SET expiry_date = ?, status = 'active' WHERE id = ?"), (new_expiry_str, cust["id"]))
     conn.commit()
     conn.close()
-    
+
     formatted_date = new_expiry.strftime("%d-%b-%Y %I:%M %p")
     return True, f"🎉 অভিনন্দন! আপনার {payment['amount']} টাকা জমা হয়েছে। আপনার ইন্টারনেট ঠিক ৩০ দিন অর্থাৎ {formatted_date} পর্যন্ত সচল থাকবে।"
+
 
 def get_stats():
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("SELECT COUNT(*) FROM customers")
-    total_cust = cur.fetchone()[0]
-    
-    cur.execute("SELECT COUNT(*) FROM customers WHERE status = 'active'")
-    active_cust = cur.fetchone()[0]
-    
-    cur.execute("SELECT COUNT(*) FROM customers WHERE status = 'expired'")
-    expired_cust = cur.fetchone()[0]
-    
-    cur.execute("SELECT SUM(amount) FROM payments WHERE status = 'used'")
-    total_revenue = cur.fetchone()[0] or 0
-    
+
+    cur.execute("SELECT COUNT(*) AS cnt FROM customers")
+    total_cust = list(cur.fetchone().values())[0] if IS_POSTGRES else cur.fetchone()[0]
+
+    cur.execute("SELECT COUNT(*) AS cnt FROM customers WHERE status = 'active'")
+    active_cust = list(cur.fetchone().values())[0] if IS_POSTGRES else cur.fetchone()[0]
+
+    cur.execute("SELECT COUNT(*) AS cnt FROM customers WHERE status = 'expired'")
+    expired_cust = list(cur.fetchone().values())[0] if IS_POSTGRES else cur.fetchone()[0]
+
+    cur.execute("SELECT COALESCE(SUM(amount), 0) AS s FROM payments WHERE status = 'used'")
+    total_revenue = list(cur.fetchone().values())[0] if IS_POSTGRES else cur.fetchone()[0]
+
     today_str = datetime.date.today().isoformat()
-    cur.execute("SELECT SUM(amount) FROM payments WHERE status = 'used' AND used_at LIKE ?", (f"{today_str}%",))
-    today_revenue = cur.fetchone()[0] or 0
-    
+    cur.execute(_q("SELECT COALESCE(SUM(amount), 0) AS s FROM payments WHERE status = 'used' AND used_at LIKE ?"), (f"{today_str}%",))
+    today_revenue = list(cur.fetchone().values())[0] if IS_POSTGRES else cur.fetchone()[0]
+
     conn.close()
     return {
-        "total": total_cust,
-        "active": active_cust,
-        "expired": expired_cust,
-        "total_revenue": total_revenue,
-        "today_revenue": today_revenue
+        "total": int(total_cust or 0),
+        "active": int(active_cust or 0),
+        "expired": int(expired_cust or 0),
+        "total_revenue": round(float(total_revenue or 0), 2),
+        "today_revenue": round(float(today_revenue or 0), 2),
     }
+
+
+def export_backup_json() -> str:
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM customers ORDER BY id ASC")
+    customers = _fetchall_dicts(cur)
+    cur.execute("SELECT * FROM payments ORDER BY id ASC")
+    payments = _fetchall_dicts(cur)
+    cur.execute("SELECT * FROM settings")
+    settings = _fetchall_dicts(cur)
+    conn.close()
+    return json.dumps({
+        "exported_at": datetime.datetime.now().isoformat(),
+        "customers": customers,
+        "payments": payments,
+        "settings": settings,
+    }, ensure_ascii=False, indent=2)
+
+
+def import_backup_json(json_text: str) -> dict:
+    data = json.loads(json_text)
+    conn = get_db()
+    cur = conn.cursor()
+    c_count = 0
+    p_count = 0
+
+    for c in data.get("customers", []):
+        cur.execute(
+            _q("""
+            INSERT INTO customers (username, password, name, phone, package_name, package_price, profile, expiry_date, status, mac_address, olt_pon, olt_onuid, onu_sn, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(username) DO UPDATE SET
+                password = excluded.password,
+                name = excluded.name,
+                phone = excluded.phone,
+                package_name = excluded.package_name,
+                package_price = excluded.package_price,
+                profile = excluded.profile,
+                expiry_date = excluded.expiry_date,
+                status = excluded.status,
+                mac_address = excluded.mac_address,
+                olt_pon = excluded.olt_pon,
+                olt_onuid = excluded.olt_onuid,
+                onu_sn = excluded.onu_sn
+            """),
+            (
+                c["username"], c.get("password", "123456"), c.get("name", ""), c.get("phone", ""),
+                c.get("package_name", "25 Mbps"), int(c.get("package_price", 525)), c.get("profile", "default"),
+                c.get("expiry_date", ""), c.get("status", "active"), c.get("mac_address", ""),
+                int(c.get("olt_pon", 0) or 0), int(c.get("olt_onuid", 0) or 0),
+                c.get("onu_sn", ""), c.get("created_at", "")
+            )
+        )
+        c_count += 1
+
+    for p in data.get("payments", []):
+        cur.execute(
+            _q("""
+            INSERT INTO payments (trx_id, amount, sender_phone, raw_sms, received_at, used_by, used_at, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(trx_id) DO NOTHING
+            """),
+            (
+                p["trx_id"], float(p["amount"]), p.get("sender_phone", ""), p.get("raw_sms", ""),
+                p.get("received_at", ""), p.get("used_by"), p.get("used_at"), p.get("status", "unused")
+            )
+        )
+        p_count += 1
+
+    conn.commit()
+    conn.close()
+    return {"customers": c_count, "payments": p_count}
