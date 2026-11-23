@@ -19,7 +19,6 @@ class BaseOLT:
         url = (url or "").strip()
         if not url:
             return ""
-        # যদি ইউজার পুরো /action/main.html সহ পেস্ট করে, মূল বেস URL বের করে নেওয়া
         m = re.match(r'^(https?://[^/]+)', url, re.IGNORECASE)
         return m.group(1).rstrip("/") if m else url.rstrip("/")
 
@@ -29,6 +28,7 @@ class BaseOLT:
     def get_onu_optical(self, pon_id: int, onu_id: int) -> dict: raise NotImplementedError
     def reboot_onu(self, pon_id: int, onu_id: int) -> bool: raise NotImplementedError
     def deactivate_onu(self, pon_id: int, onu_id: int) -> bool: raise NotImplementedError
+    def set_onu_vlan_profile(self, pon_id: int, onu_id: int, linename: str, srvname: str) -> bool: raise NotImplementedError
 
 
 class VsolGponWebOLT(BaseOLT):
@@ -53,12 +53,7 @@ class VsolGponWebOLT(BaseOLT):
 
         resp = self.session.post(
             f"{self.base_url}/action/main.html",
-            data={
-                "user": self.user,
-                "pass": self.password,
-                "button": "Submit",
-                "who": "100",
-            },
+            data={"user": self.user, "pass": self.password, "button": "Submit", "who": "100"},
             headers={"Referer": f"{self.base_url}/action/login.html"},
             timeout=12,
         )
@@ -74,8 +69,7 @@ class VsolGponWebOLT(BaseOLT):
             pass
 
     def test_connection(self) -> dict:
-        info = self.get_system_info()
-        return {"ok": True, "info": info}
+        return {"ok": True, "info": self.get_system_info()}
 
     def get_system_info(self) -> dict:
         self.login()
@@ -94,10 +88,15 @@ class VsolGponWebOLT(BaseOLT):
             self.logout()
 
     @staticmethod
-    def _parse_onu_table(html: str, default_pon_id: int = 1):
-        soup = BeautifulSoup(html, "html.parser")
+    def _extract_vlan_num(profile_name: str) -> str:
+        if not profile_name or profile_name.upper() == "N/A":
+            return "N/A"
+        m = re.search(r'(\d+)$', profile_name.strip())
+        return m.group(1) if m else profile_name.strip()
 
-        # ডাইনামিক PON পোর্ট তালিকা বের করা (৪, ৮ বা ১৬ পোর্ট যাই হোক)
+    @staticmethod
+    def _parse_onu_table(html: str):
+        soup = BeautifulSoup(html, "html.parser")
         pon_ports = []
         sel = soup.find("select", {"name": "select"})
         if sel:
@@ -115,29 +114,71 @@ class VsolGponWebOLT(BaseOLT):
             m = re.search(r'(\d+):(\d+)$', onu_label)
             if not m:
                 continue
-            pon_id = int(m.group(1))
-            onu_id = int(m.group(2))
+            pon_id, onu_id = int(m.group(1)), int(m.group(2))
             status_text = tds[1].get_text(strip=True)
-            desc = tds[2].get_text(strip=True)
-            model = tds[3].get_text(strip=True)
-            profile = tds[4].get_text(strip=True)
-            mode = tds[5].get_text(strip=True)
-            sn_info = tds[6].get_text(strip=True)
-
             onus.append({
                 "label": onu_label,
                 "pon_id": pon_id,
                 "onu_id": onu_id,
                 "status": status_text,
                 "online": status_text.lower() == "online",
-                "description": desc,
-                "model": model,
-                "profile": profile,
-                "mode": mode,
-                "sn": sn_info,
+                "description": tds[2].get_text(strip=True),
+                "model": tds[3].get_text(strip=True),
+                "profile": tds[4].get_text(strip=True),
+                "mode": tds[5].get_text(strip=True),
+                "sn": tds[6].get_text(strip=True),
+                "line_profile": "N/A",
+                "service_profile": "N/A",
+                "vlan": "N/A",
             })
-
         return pon_ports, onus
+
+    @staticmethod
+    def _parse_bind_table(html: str, default_pon_id: int):
+        soup = BeautifulSoup(html, "html.parser")
+        bindings = {}
+        for tr in soup.find_all("tr"):
+            tds = tr.find_all("td")
+            if len(tds) < 4:
+                continue
+            first_col = tds[0].get_text(strip=True)
+            if not first_col.isdigit():
+                continue
+            onu_id = int(first_col)
+            line_prof = tds[2].get_text(strip=True)
+            srv_prof = tds[3].get_text(strip=True)
+            bindings[(int(default_pon_id), onu_id)] = {
+                "line_profile": line_prof,
+                "service_profile": srv_prof,
+            }
+        return bindings
+
+    def _get_available_profiles(self, sample_pon: int = 1, sample_onu: int = 1):
+        line_profiles, srv_profiles = [], []
+        try:
+            r = self.session.get(
+                f"{self.base_url}/action/onuprofilebindcfg.html?ponid={sample_pon}&onuid={sample_onu}",
+                timeout=10,
+            )
+            soup = BeautifulSoup(r.text, "html.parser")
+            s1 = soup.find("select", {"name": "linename"})
+            if s1:
+                line_profiles = [o.get("value", o.get_text(strip=True)).strip() for o in s1.find_all("option")]
+            s2 = soup.find("select", {"name": "srvname"})
+            if s2:
+                srv_profiles = [o.get("value", o.get_text(strip=True)).strip() for o in s2.find_all("option")]
+        except Exception as e:
+            logger.warning(f"Could not fetch profile list: {e}")
+
+        presets = []
+        srv_by_num = {self._extract_vlan_num(s): s for s in srv_profiles if s != "N/A"}
+        for lp in line_profiles:
+            if lp == "N/A":
+                continue
+            num = self._extract_vlan_num(lp)
+            sp = srv_by_num.get(num, srv_profiles[0] if srv_profiles else "N/A")
+            presets.append({"vlan": num, "linename": lp, "srvname": sp})
+        return line_profiles, srv_profiles, presets
 
     def get_onus(self, pon_id=None) -> dict:
         self.login()
@@ -145,18 +186,14 @@ class VsolGponWebOLT(BaseOLT):
             resp = self.session.get(f"{self.base_url}/action/onuauthinfo.html", timeout=15)
             resp.raise_for_status()
             pon_ports, first_onus = self._parse_onu_table(resp.text)
-
             if not pon_ports:
                 pon_ports = [{"id": 1, "name": "PON1"}]
 
-            all_onus = []
-            if pon_id and str(pon_id).isdigit():
-                target_pons = [int(pon_id)]
-            else:
-                target_pons = [p["id"] for p in pon_ports]
-
-            # প্রথম পেজে কোন PON আগে থেকে লোড হয়ে আছে দেখা
+            target_pons = [int(pon_id)] if (pon_id and str(pon_id).isdigit()) else [p["id"] for p in pon_ports]
             loaded_pon = first_onus[0]["pon_id"] if first_onus else None
+
+            all_onus = []
+            all_bindings = {}
 
             for pid in target_pons:
                 if loaded_pon == pid and first_onus:
@@ -168,8 +205,30 @@ class VsolGponWebOLT(BaseOLT):
                         timeout=15,
                     )
                     r_pon.raise_for_status()
-                    _, pon_onus = self._parse_onu_table(r_pon.text, default_pon_id=pid)
+                    _, pon_onus = self._parse_onu_table(r_pon.text)
                     all_onus.extend(pon_onus)
+
+                # একই সেশনে onuprofilebind.html থেকে বর্তমান Line/Service Profile ও VLAN আনা
+                try:
+                    r_bind = self.session.post(
+                        f"{self.base_url}/action/onuprofilebind.html",
+                        data={"select": str(pid), "who": "100", "onuid": "0"},
+                        timeout=15,
+                    )
+                    all_bindings.update(self._parse_bind_table(r_bind.text, pid))
+                except Exception as e:
+                    logger.warning(f"Profile bind fetch failed for PON {pid}: {e}")
+
+            for o in all_onus:
+                b = all_bindings.get((o["pon_id"], o["onu_id"]))
+                if b:
+                    o["line_profile"] = b["line_profile"]
+                    o["service_profile"] = b["service_profile"]
+                    o["vlan"] = self._extract_vlan_num(b["line_profile"])
+
+            sample_pon = target_pons[0] if target_pons else 1
+            sample_onu = all_onus[0]["onu_id"] if all_onus else 1
+            line_profiles, srv_profiles, vlan_presets = self._get_available_profiles(sample_pon, sample_onu)
 
             online_count = sum(1 for o in all_onus if o["online"])
             total_count = len(all_onus)
@@ -179,7 +238,41 @@ class VsolGponWebOLT(BaseOLT):
                 "online": online_count,
                 "offline": total_count - online_count,
                 "total": total_count,
+                "line_profiles": line_profiles,
+                "service_profiles": srv_profiles,
+                "vlan_presets": vlan_presets,
             }
+        finally:
+            self.logout()
+
+    def set_onu_vlan_profile(self, pon_id: int, onu_id: int, linename: str, srvname: str,
+                             alaname: str = "N/A", priname: str = "N/A", fmtname: str = "N/A") -> bool:
+        self.login()
+        try:
+            cfg_url = f"{self.base_url}/action/onuprofilebindcfg.html?ponid={int(pon_id)}&onuid={int(onu_id)}"
+            try:
+                self.session.get(cfg_url, timeout=10)
+            except Exception:
+                pass
+
+            resp = self.session.post(
+                f"{self.base_url}/action/onuprofilebindcfg.html",
+                data={
+                    "linename": linename,
+                    "srvname": srvname,
+                    "alaname": alaname,
+                    "priname": priname,
+                    "fmtname": fmtname,
+                    "Commit": "Commit",
+                    "who": "0",
+                    "pon_id": str(int(pon_id)),
+                    "onu_id": str(int(onu_id)),
+                },
+                headers={"Referer": cfg_url},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            return True
         finally:
             self.logout()
 
@@ -196,8 +289,7 @@ class VsolGponWebOLT(BaseOLT):
             for tr in soup.find_all("tr"):
                 tds = tr.find_all("td")
                 if len(tds) >= 2:
-                    k = tds[0].get_text(strip=True)
-                    v = tds[1].get_text(strip=True)
+                    k, v = tds[0].get_text(strip=True), tds[1].get_text(strip=True)
                     if k:
                         raw[k] = v
 
