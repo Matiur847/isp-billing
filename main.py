@@ -421,10 +421,10 @@ async def admin_dashboard(request: Request, background_tasks: BackgroundTasks, e
             </div>
         </div>"""
 
-    pay_rows = "".join(
-        f"<tr><td><b>{h(p['trx_id'])}</b></td><td><b class='text-success'>{p['amount']} ৳</b></td><td><small>{h(p['sender_phone'])}</small></td><td><small>{h(p['received_at'])}</small></td><td>{'<span class=\"badge bg-secondary\">Used</span>' if p['status']=='used' else '<span class=\"badge bg-success\">Unused</span>'}</td><td><b>{h(p['used_by'] or '-')}</b></td></tr>"
-        for p in payments
-    )
+    pay_rows = pay_rows = ""
+    for p in payments:
+        ub = '<span class="badge bg-secondary">Used</span>' if p["status"] == "used" else '<span class="badge bg-success">Unused</span>'
+        pay_rows += f"<tr><td><b>{h(p['trx_id'])}</b></td><td><b class='text-success'>{p['amount']} ৳</b></td><td><small>{h(p['sender_phone'])}</small></td><td><small>{h(p['received_at'])}</small></td><td>{ub}</td><td><b>{h(p['used_by'] or '-')}</b></td></tr>"
 
     def profile_options(selected):
         opts = list(profiles) + ([selected] if selected and selected not in profiles else [])
