@@ -94,8 +94,9 @@ def admin_dashboard(request: Request, background_tasks: BackgroundTasks, edit_id
         search_txt = core.h((uname + " " + (c["name"] or "") + " " + (c["phone"] or "") + " " + onu_sn + " " + mac).lower())
         net_btn = f'<a href="/admin/toggle-suspend/{c["id"]}" class="btn btn-sm btn-outline-danger fw-bold" title="নেট বন্ধ করুন"><i class="fa-solid fa-power-off"></i> Off</a>' if c["status"] == "active" else f'<a href="/admin/toggle-suspend/{c["id"]}" class="btn btn-sm btn-success fw-bold" title="নেট চালু করুন"><i class="fa-solid fa-power-off"></i> On</a>'
 
+        online_st = "online" if is_online else "offline"
         cust_rows_html += f"""
-        <div class="card mb-2 p-2 border customer-card" data-search="{search_txt}">
+        <div class="card mb-2 p-2 border customer-card" data-search="{search_txt}" data-status="{core.h(c['status'])}" data-online="{online_st}">
             <div class="row align-items-center g-2">
                 <div class="col-12 col-md-3">
                     <div class="d-flex align-items-center flex-wrap gap-1 mb-1">{online_badge}</div>
@@ -174,13 +175,22 @@ def admin_dashboard(request: Request, background_tasks: BackgroundTasks, edit_id
         </div>
     </div>
     <div class="row g-3 mb-4">
-        <div class="col-6 col-md-3"><div class="stat-card bg-primary shadow-sm"><small class="fw-bold opacity-75">মোট গ্রাহক</small><h2 class="fw-bold mb-0">{stats['total']}</h2></div></div>
-        <div class="col-6 col-md-3"><div class="stat-card bg-success shadow-sm"><small class="fw-bold opacity-75">সচল গ্রাহক</small><h2 class="fw-bold mb-0">{stats['active']}</h2></div></div>
-        <div class="col-6 col-md-3"><div class="stat-card bg-danger shadow-sm"><small class="fw-bold opacity-75">মেয়াদোত্তীর্ণ</small><h2 class="fw-bold mb-0">{stats['expired']}</h2></div></div>
+        <div class="col-6 col-md-3"><div class="stat-card bg-primary shadow-sm" style="cursor:pointer;" onclick="setCardFilter('all')"><small class="fw-bold opacity-75">মোট গ্রাহক</small><h2 class="fw-bold mb-0">{stats['total']}</h2></div></div>
+        <div class="col-6 col-md-3"><div class="stat-card bg-success shadow-sm" style="cursor:pointer;" onclick="setCardFilter('active')"><small class="fw-bold opacity-75">সচল গ্রাহক</small><h2 class="fw-bold mb-0">{stats['active']}</h2></div></div>
+        <div class="col-6 col-md-3"><div class="stat-card bg-danger shadow-sm" style="cursor:pointer;" onclick="setCardFilter('expired')"><small class="fw-bold opacity-75">মেয়াদোত্তীর্ণ</small><h2 class="fw-bold mb-0">{stats['expired']}</h2></div></div>
         <div class="col-6 col-md-3"><a href="/admin/payments" class="text-decoration-none"><div class="stat-card bg-dark shadow-sm"><small class="fw-bold opacity-75">মোট কালেকশন (দেখুন ➔)</small><h2 class="fw-bold mb-0">{stats['total_revenue']} ৳</h2></div></a></div>
     </div>
     {edit_form_html}
-    <div class="card p-3 mb-3 bg-white border-0 shadow-sm"><div class="row align-items-center g-2"><div class="col-md-6"><input type="text" id="custSearchInput" class="form-control" placeholder="গ্রাহকের নাম, ইউজার আইডি, মোবাইল, MAC বা ONU SN দিয়ে খুঁজুন..." onkeyup="filterCustomerCards()"></div><div class="col-md-6 text-md-end text-muted small">মোট: <b>{len(customers)} জন</b> | অনলাইন: <b>{len(actives)} জন</b></div></div></div>
+    <div class="card p-3 mb-3 bg-white border-0 shadow-sm"><div class="row align-items-center g-2">
+        <div class="col-md-5"><input type="text" id="custSearchInput" class="form-control" placeholder="গ্রাহকের নাম, ইউজার আইডি, মোবাইল, MAC বা ONU SN দিয়ে খুঁজুন..." onkeyup="filterCustomerCards()"></div>
+        <div class="col-md-7 text-md-end d-flex flex-wrap justify-content-md-end gap-1">
+            <button type="button" class="btn btn-sm btn-outline-primary fw-bold filter-pill active" data-filter="all" onclick="setCardFilter('all')">সব ({len(customers)})</button>
+            <button type="button" class="btn btn-sm btn-outline-success fw-bold filter-pill" data-filter="online" onclick="setCardFilter('online')">অনলাইন ({sum(1 for c in customers if c['username'] in actives)})</button>
+            <button type="button" class="btn btn-sm btn-outline-secondary fw-bold filter-pill" data-filter="offline" onclick="setCardFilter('offline')">অফলাইন ({sum(1 for c in customers if c['username'] not in actives)})</button>
+            <button type="button" class="btn btn-sm btn-outline-primary fw-bold filter-pill" data-filter="active" onclick="setCardFilter('active')">Active ({stats['active']})</button>
+            <button type="button" class="btn btn-sm btn-outline-danger fw-bold filter-pill" data-filter="expired" onclick="setCardFilter('expired')">Expired ({stats['expired']})</button>
+        </div>
+    </div></div>
     <div id="customerCardsContainer">{cust_rows_html or '<div class="alert alert-light text-center">কোনো গ্রাহক নেই।</div>'}</div>
 </div>
 
