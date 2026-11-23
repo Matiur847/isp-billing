@@ -125,6 +125,42 @@ def check_expired_users_task():
         logger.error(f"check_expired_users_task error: {e}")
 
 
+def _parse_mk_dt(dt_str: str):
+    s = (dt_str or "").strip()
+    if not s or "1970" in s:
+        return None
+    for fmt in ("%b/%d/%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.datetime.strptime(s, fmt)
+        except Exception:
+            pass
+    try:
+        return datetime.datetime.strptime(s.title(), "%b/%d/%Y %H:%M:%S")
+    except Exception:
+        return None
+
+
+def _format_offline_ago(router_now, last_logout_str: str) -> str:
+    dt = _parse_mk_dt(last_logout_str)
+    if not dt or not router_now:
+        return ""
+    secs = int((router_now - dt).total_seconds())
+    if secs < 0:
+        return ""
+    if secs < 60:
+        return f"{secs} সেকেন্ড আগে"
+    mins = secs // 60
+    if mins < 60:
+        return f"{mins} মিনিট আগে"
+    hrs = mins // 60
+    rem_mins = mins % 60
+    if hrs < 24:
+        return f"{hrs} ঘণ্টা {rem_mins} মিনিট আগে" if rem_mins else f"{hrs} ঘণ্টা আগে"
+    days = hrs // 24
+    rem_hrs = hrs % 24
+    return f"{days} দিন {rem_hrs} ঘণ্টা আগে" if rem_hrs else f"{days} দিন আগে"
+
+
 def calculate_expiry_label(expiry_str: str, status_str: str):
     now = datetime.datetime.now()
     try:
@@ -214,7 +250,7 @@ async def api_live_speed(username: str):
         api.close()
         return speed
     except Exception as e:
-        return {"rx_mbps": 0.0, "tx_mbps": 0.0, "online": False, "error": str(e)}
+        return {"rx_mbps": 0.0, "tx_mbps": 0.0, "dl_bps": 0, "ul_bps": 0, "online": False, "error": str(e)}
 
 
 @app.post("/api/sms-webhook")
@@ -354,15 +390,20 @@ async def admin_dashboard(request: Request, background_tasks: BackgroundTasks, e
     bkash_num = h(database.get_setting("bkash_number", "01XXXXXXXXX"))
     edit_cust = database.get_customer_by_id(edit_id) if edit_id else None
 
-    actives, profiles, mk_online, mk_error = {}, ["default", "Profile-Line2", "Profile-Line3"], False, ""
+    actives, secrets_list, profiles, mk_online, mk_error = {}, [], ["default", "Profile-Line2", "Profile-Line3"], False, ""
+    router_now = None
     try:
         api = get_mikrotik_conn()
         actives = api.get_active_pppoe()
+        secrets_list = api.get_all_secrets()
         profiles = api.get_profiles() or profiles
+        router_now = _parse_mk_dt(api.get_router_clock())
         api.close()
         mk_online = True
     except Exception as e:
         mk_error = str(e)
+
+    secret_by_uname = {(s.get("name") or "").strip().lower(): s for s in secrets_list}
 
     if mk_online:
         expired_names = database.get_all_expired_usernames()
@@ -376,13 +417,20 @@ async def admin_dashboard(request: Request, background_tasks: BackgroundTasks, e
     cust_rows_html = ""
     for c in customers:
         uname = c["username"]
+        sec = secret_by_uname.get(uname.strip().lower(), {})
         is_online = uname in actives
         act = actives.get(uname, {})
         ip, uptime = act.get("address", "Offline"), act.get("uptime", "Offline")
-        mac = act.get("caller_id", c.get("mac_address") or "No MAC")
+        mac = act.get("caller_id") or c.get("mac_address") or sec.get("last_caller_id") or "No MAC"
         usage_gb = act.get("usage_gb", 0.0) if is_online else 0.0
 
-        online_badge = f'<span class="badge bg-success-subtle text-success border border-success-subtle rounded-pill px-2">● Online</span> <span class="text-secondary small fw-bold">{h(uptime)}</span> <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-decoration-none badge bg-info-subtle text-primary border border-info-subtle" data-username="{h(uname)}" data-name="{h(c["name"] or uname)}" onclick="openLiveSpeedBtn(this)"><i class="fa-solid fa-chart-line"></i> Live</button>' if is_online else '<span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle rounded-pill px-2">○ Offline</span>'
+        if is_online:
+            online_badge = f'<span class="badge bg-success-subtle text-success border border-success-subtle rounded-pill px-2">● Online</span> <span class="text-secondary small fw-bold">{h(uptime)}</span> <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-decoration-none badge bg-info-subtle text-primary border border-info-subtle" data-username="{h(uname)}" data-name="{h(c["name"] or uname)}" onclick="openLiveSpeedBtn(this)"><i class="fa-solid fa-chart-line"></i> Live</button>'
+        else:
+            ago = _format_offline_ago(router_now, sec.get("last_logged_out", ""))
+            ago_html = f' <span class="text-danger small fw-bold">• {h(ago)}</span>' if ago else ""
+            online_badge = f'<span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle rounded-pill px-2">○ Offline</span>{ago_html}'
+
         time_lbl, time_cls, st_lbl, st_cls = calculate_expiry_label(c["expiry_date"], c["status"])
         dname = h(c["name"] or uname)
         try:
@@ -468,6 +516,7 @@ async def admin_dashboard(request: Request, background_tasks: BackgroundTasks, e
 <title>{company} - Admin Dashboard</title>
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
 <style>body{{background:#eef2f6;font-family:'Segoe UI',sans-serif;}}.card{{border-radius:12px;}}.stat-card{{border-radius:12px;padding:18px;color:white;}}.action-btn{{border-radius:10px;padding:10px 12px;font-weight:600;display:inline-flex;align-items:center;justify-content:center;gap:6px;font-size:14px;text-decoration:none;}}</style>
 </head><body class="p-2 p-md-4"><div class="container-fluid">
     {admin_navbar("dashboard")} {msg_alert}
@@ -491,7 +540,27 @@ async def admin_dashboard(request: Request, background_tasks: BackgroundTasks, e
 </div>
 
 <div class="modal fade" id="actionModal" tabindex="-1"><div class="modal-dialog modal-dialog-centered"><div class="modal-content border-0 shadow"><div class="modal-header border-bottom"><h5 class="modal-title fw-bold" id="actionModalTitle">Actions</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body p-4"><div class="row g-2" id="actionButtonsGrid"></div></div></div></div></div>
-<div class="modal fade" id="speedModal" tabindex="-1"><div class="modal-dialog modal-dialog-centered"><div class="modal-content border-0 shadow text-center"><div class="modal-header bg-primary text-white"><h5 class="modal-title fw-bold"><i class="fa-solid fa-chart-line me-2"></i>Live Traffic</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div><div class="modal-body p-4"><h6 class="text-muted mb-3" id="speedUserLabel">Loading...</h6><div class="row g-3"><div class="col-6"><div class="p-3 bg-light rounded-3 border border-success"><div class="text-success small fw-bold">ডাউনলোড</div><h2 class="fw-bold text-success my-2" id="rxSpeed">0.00</h2><small>Mbps</small></div></div><div class="col-6"><div class="p-3 bg-light rounded-3 border border-primary"><div class="text-primary small fw-bold">আপলোড</div><h2 class="fw-bold text-primary my-2" id="txSpeed">0.00</h2><small>Mbps</small></div></div></div><div class="mt-3"><span class="badge bg-success" id="speedOnlineStatus">● Monitoring</span></div></div></div></div></div>
+
+<div class="modal fade" id="speedModal" tabindex="-1"><div class="modal-dialog modal-dialog-centered"><div class="modal-content border-0 shadow" style="border-radius:16px;">
+    <div class="modal-header border-0 pb-1">
+        <h6 class="modal-title fw-bold text-secondary" id="speedUserLabel">Live Traffic Monitor</h6>
+        <span class="badge bg-success ms-2" id="speedOnlineStatus">● Live</span>
+    </div>
+    <div class="modal-body pt-2 pb-3 px-4">
+        <div class="mb-2" style="font-size:15px;"><b style="color:#16a34a;">Download:</b> <span id="dlText" class="fw-bold text-dark">0 bps</span></div>
+        <hr class="my-2 opacity-25">
+        <div class="mb-3" style="font-size:15px;"><b style="color:#dc2626;">Upload:</b> <span id="ulText" class="fw-bold text-dark">0 bps</span></div>
+        <div class="d-flex justify-content-end gap-3 small mb-2 text-secondary">
+            <span><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#ef4444;"></span> Upload</span>
+            <span><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#22c55e;"></span> Download</span>
+        </div>
+        <div style="height:220px;"><canvas id="speedChart"></canvas></div>
+        <div class="text-end mt-3">
+            <button type="button" class="btn px-4 fw-bold text-white" style="background:#5b6b7f;border-radius:10px;" data-bs-dismiss="modal">Close</button>
+        </div>
+    </div>
+</div></div></div>
+
 <div class="modal fade" id="opticalModal" tabindex="-1"><div class="modal-dialog modal-dialog-centered"><div class="modal-content border-0 shadow"><div class="modal-header bg-dark text-white"><h5 class="modal-title fw-bold"><i class="fa-solid fa-signal text-info me-2"></i>ONU Optical Signal</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div><div class="modal-body" id="opticalModalBody">লোড হচ্ছে...</div></div></div></div>
 <div class="modal fade" id="newCustomerModal" tabindex="-1"><div class="modal-dialog modal-lg"><div class="modal-content"><div class="modal-header bg-primary text-white"><h5 class="modal-title fw-bold">নতুন গ্রাহক যুক্ত করুন</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div><form method="POST" action="/admin/create-customer"><div class="modal-body"><div class="row g-3"><div class="col-md-6"><label class="form-label fw-bold">PPPoE ইউজার আইডি *</label><input type="text" name="username" class="form-control" required></div><div class="col-md-6"><label class="form-label fw-bold">PPPoE পাসওয়ার্ড *</label><input type="text" name="password" class="form-control" value="123456" required></div><div class="col-md-6"><label class="form-label fw-bold">গ্রাহকের নাম</label><input type="text" name="name" class="form-control"></div><div class="col-md-6"><label class="form-label fw-bold">মোবাইল নম্বর</label><input type="text" name="phone" class="form-control"></div><div class="col-md-4"><label class="form-label fw-bold">প্যাকেজ নাম</label><input type="text" name="package_name" class="form-control" value="25 Mbps"></div><div class="col-md-4"><label class="form-label fw-bold">মাসিক বিল (৳)</label><input type="number" name="package_price" class="form-control" value="525"></div><div class="col-md-4"><label class="form-label fw-bold">প্রোফাইল</label><select name="profile" class="form-select">{profile_options('default')}</select></div><div class="col-md-6"><label class="form-label fw-bold">প্রাথমিক মেয়াদ (দিন)</label><input type="number" name="days_valid" class="form-control" value="30"></div></div></div><div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">বন্ধ</button><button type="submit" class="btn btn-primary fw-bold">সংরক্ষণ ও সিঙ্ক</button></div></form></div></div></div>
 
@@ -517,9 +586,80 @@ function openActionDrawer(btn){{
     actionModalInstance=new bootstrap.Modal(document.getElementById("actionModal"));actionModalInstance.show();
 }}
 function openLiveSpeedBtn(btn){{openLiveSpeed(btn.dataset.username,btn.dataset.name);}}
-let speedInterval=null;
-function openLiveSpeed(u,n){{document.getElementById("speedUserLabel").innerText=n+" ("+u+")";new bootstrap.Modal(document.getElementById("speedModal")).show();fetchSpeed(u);if(speedInterval)clearInterval(speedInterval);speedInterval=setInterval(()=>fetchSpeed(u),1500);}}
-async function fetchSpeed(u){{try{{const r=await fetch('/api/live-speed/'+encodeURIComponent(u));const d=await r.json();document.getElementById("rxSpeed").innerText=(d.rx_mbps||0).toFixed(2);document.getElementById("txSpeed").innerText=(d.tx_mbps||0).toFixed(2);const sb=document.getElementById("speedOnlineStatus");sb.className=d.online?"badge bg-success":"badge bg-secondary";sb.innerText=d.online?"● Connected & Active":"○ Idle or Offline";}}catch(e){{}}}}
+
+function formatBps(bps){{
+    bps=Number(bps)||0;
+    if(bps<=0)return "0 bps";
+    if(bps<1000)return bps.toFixed(0)+" bps";
+    if(bps<1000000)return (bps/1000).toFixed(2).replace(/\\.00$/,"")+" Kbps";
+    return (bps/1000000).toFixed(2).replace(/\\.00$/,"")+" Mbps";
+}}
+
+let speedInterval=null, speedChartObj=null;
+function initSpeedChart(){{
+    const canvas=document.getElementById("speedChart");
+    const ctx=canvas.getContext("2d");
+    const gUl=ctx.createLinearGradient(0,0,0,200);
+    gUl.addColorStop(0,"rgba(239,68,68,0.28)");gUl.addColorStop(1,"rgba(239,68,68,0.0)");
+    const gDl=ctx.createLinearGradient(0,0,0,200);
+    gDl.addColorStop(0,"rgba(34,197,94,0.28)");gDl.addColorStop(1,"rgba(34,197,94,0.0)");
+    if(speedChartObj)speedChartObj.destroy();
+    speedChartObj=new Chart(ctx,{{
+        type:"line",
+        data:{{
+            labels:[],
+            datasets:[
+                {{label:"Upload",data:[],borderColor:"#ef4444",backgroundColor:gUl,borderWidth:2.5,tension:0.4,fill:true,pointRadius:0}},
+                {{label:"Download",data:[],borderColor:"#22c55e",backgroundColor:gDl,borderWidth:2.5,tension:0.4,fill:true,pointRadius:0}}
+            ]
+        }},
+        options:{{
+            responsive:true,maintainAspectRatio:false,animation:{{duration:250}},
+            plugins:{{legend:{{display:false}}}},
+            scales:{{
+                x:{{grid:{{display:false}},ticks:{{maxTicksLimit:6,color:"#64748b",font:{{size:11}}}}}},
+                y:{{beginAtZero:true,border:{{display:false,dash:[4,4]}},grid:{{color:"#e2e8f0",tickBorderDash:[4,4]}},ticks:{{maxTicksLimit:5,color:"#64748b",font:{{size:11}},callback:v=>v===0?"0":formatBps(v)}}}}
+            }}
+        }}
+    }});
+}}
+
+function openLiveSpeed(u,n){{
+    document.getElementById("speedUserLabel").innerText=n+" ("+u+")";
+    document.getElementById("dlText").innerText="0 bps";
+    document.getElementById("ulText").innerText="0 bps";
+    initSpeedChart();
+    new bootstrap.Modal(document.getElementById("speedModal")).show();
+    fetchSpeed(u);
+    if(speedInterval)clearInterval(speedInterval);
+    speedInterval=setInterval(()=>fetchSpeed(u),1500);
+}}
+
+async function fetchSpeed(u){{
+    try{{
+        const r=await fetch('/api/live-speed/'+encodeURIComponent(u));
+        const d=await r.json();
+        const dl=d.dl_bps!==undefined?d.dl_bps:Math.round((d.rx_mbps||0)*1000000);
+        const ul=d.ul_bps!==undefined?d.ul_bps:Math.round((d.tx_mbps||0)*1000000);
+        document.getElementById("dlText").innerText=formatBps(dl);
+        document.getElementById("ulText").innerText=formatBps(ul);
+        const sb=document.getElementById("speedOnlineStatus");
+        sb.className=d.online?"badge bg-success ms-2":"badge bg-secondary ms-2";
+        sb.innerText=d.online?"● Live":"○ Offline";
+        if(speedChartObj){{
+            const t=new Date().toLocaleTimeString('en-GB',{{hour12:false}});
+            speedChartObj.data.labels.push(t);
+            speedChartObj.data.datasets[0].data.push(ul);
+            speedChartObj.data.datasets[1].data.push(dl);
+            if(speedChartObj.data.labels.length>20){{
+                speedChartObj.data.labels.shift();
+                speedChartObj.data.datasets[0].data.shift();
+                speedChartObj.data.datasets[1].data.shift();
+            }}
+            speedChartObj.update();
+        }}
+    }}catch(e){{}}
+}}
 document.getElementById("speedModal").addEventListener('hidden.bs.modal',()=>{{if(speedInterval)clearInterval(speedInterval);}});
 async function openOpticalModal(pon,onuid,sn){{
     const b=document.getElementById("opticalModalBody");b.innerHTML='<div class="text-center py-4"><div class="spinner-border text-primary"></div><div class="mt-2">লোড হচ্ছে...</div></div>';
@@ -630,7 +770,6 @@ async def olt_dashboard(request: Request, background_tasks: BackgroundTasks, pon
     except Exception:
         pass
 
-    # MikroTik (Active + Secret) ও DB থেকে MAC -> Customer ম্যাপ তৈরি
     cust_by_mac = {}
     for c in customers:
         if c.get("mac_address"):
@@ -683,8 +822,7 @@ async def olt_dashboard(request: Request, background_tasks: BackgroundTasks, pon
         db_linked = cust_by_onu.get((o["pon_id"], o["onu_id"])) or cust_by_sn.get((o["sn"] or "").strip().upper())
         onu_macs = o.get("macs", [])
 
-        matched_list = []
-        is_auto = False
+        matched_list, is_auto = [], False
         if db_linked:
             matched_list = [db_linked]
         else:
