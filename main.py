@@ -1,5 +1,6 @@
 import os
 import re
+import time
 import html
 import hashlib
 import datetime
@@ -19,6 +20,15 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("billing_app")
 
 COOKIE_NAME = "admin_session"
+
+# ইন-মেমোরি স্মার্ট ক্যাশ (সাইট ফাস্ট রাখার জন্য)
+_PROFILES_CACHE = {"ts": 0.0, "data": ["default", "Profile-Line2", "Profile-Line3"]}
+_OLT_CACHE = {}  # key: pon_id -> {"ts": float, "data": dict}
+
+
+def _clear_caches():
+    _PROFILES_CACHE["ts"] = 0.0
+    _OLT_CACHE.clear()
 
 
 def h(val) -> str:
@@ -392,13 +402,17 @@ def admin_dashboard(request: Request, background_tasks: BackgroundTasks, edit_id
     bkash_num = h(database.get_setting("bkash_number", "01XXXXXXXXX"))
     edit_cust = database.get_customer_by_id(edit_id) if edit_id else None
 
-    actives, secrets_list, profiles, mk_online, mk_error = {}, [], ["default", "Profile-Line2", "Profile-Line3"], False, ""
+    actives, secrets_list, mk_online, mk_error = {}, [], False, ""
+    profiles = _PROFILES_CACHE["data"]
     router_now = None
     try:
         api = get_mikrotik_conn()
         actives = api.get_active_pppoe()
         secrets_list = api.get_all_secrets()
-        profiles = api.get_profiles() or profiles
+        if time.time() - _PROFILES_CACHE["ts"] > 300:
+            _PROFILES_CACHE["data"] = api.get_profiles() or profiles
+            _PROFILES_CACHE["ts"] = time.time()
+            profiles = _PROFILES_CACHE["data"]
         router_now = _parse_mk_dt(api.get_router_clock())
         api.close()
         mk_online = True
@@ -645,6 +659,7 @@ function openLiveSpeed(u,n){{
 
 async function pollSpeedLoop(u,mySid){{
     if(mySid!==speedSid)return;
+    if(document.hidden){{speedTimer=setTimeout(()=>pollSpeedLoop(u,mySid),1000);return;}}
     speedAbort=new AbortController();
     try{{
         const r=await fetch('/api/live-speed/'+encodeURIComponent(u),{{signal:speedAbort.signal}});
@@ -673,7 +688,7 @@ async function pollSpeedLoop(u,mySid){{
         if(e.name==="AbortError")return;
     }}
     if(mySid===speedSid){{
-        speedTimer=setTimeout(()=>pollSpeedLoop(u,mySid),250);
+        speedTimer=setTimeout(()=>pollSpeedLoop(u,mySid),700);
     }}
 }}
 document.getElementById("speedModal").addEventListener('hidden.bs.modal',stopSpeedMonitor);
@@ -770,7 +785,7 @@ def sync_mikrotik_users(request: Request):
 
 # --- OLT MONITOR ---
 @app.get("/admin/olt", response_class=HTMLResponse)
-def olt_dashboard(request: Request, background_tasks: BackgroundTasks, pon_id: str = "2", msg: Optional[str] = None):
+def olt_dashboard(request: Request, background_tasks: BackgroundTasks, pon_id: str = "2", refresh: int = 0, msg: Optional[str] = None):
     if not is_authenticated(request):
         return RedirectResponse(url="/login")
 
@@ -813,16 +828,22 @@ def olt_dashboard(request: Request, background_tasks: BackgroundTasks, pon_id: s
 
     olt_data = {"pon_ports": [], "onus": [], "online": 0, "offline": 0, "total": 0, "line_profiles": [], "service_profiles": [], "vlan_presets": []}
     olt_error = ""
-    try:
-        olt_data = get_olt_conn().get_onus(pon_id=None if pon_id == "all" else pon_id)
-    except Exception as e:
-        olt_error = str(e)
+    cached = _OLT_CACHE.get(pon_id)
+    if not refresh and cached and (time.time() - cached["ts"] < 30):
+        olt_data = cached["data"]
+    else:
+        try:
+            olt_data = get_olt_conn().get_onus(pon_id=None if pon_id == "all" else pon_id)
+            _OLT_CACHE[pon_id] = {"ts": time.time(), "data": olt_data}
+        except Exception as e:
+            olt_error = str(e)
 
     pon_all_cls = "btn-primary" if pon_id == "all" else "btn-outline-primary"
     pon_buttons = f'<a href="/admin/olt?pon_id=all" class="btn btn-sm {pon_all_cls} fw-bold">সব PON</a>'
     for p in olt_data["pon_ports"]:
         p_cls = "btn-primary" if str(p["id"]) == str(pon_id) else "btn-outline-primary"
         pon_buttons += f' <a href="/admin/olt?pon_id={p["id"]}" class="btn btn-sm {p_cls} fw-bold">{h(p["name"])}</a>'
+    pon_buttons += f' <a href="/admin/olt?pon_id={h(pon_id)}&refresh=1" class="btn btn-sm btn-outline-success fw-bold ms-2"><i class="fa-solid fa-rotate"></i> রিফ্রেশ</a>'
 
     cust_options = "".join(
         f'<option value="{c["id"]}">{h(c["name"] or c["username"])} ({h(c["username"])}) {h(c.get("phone") or "")}</option>'
@@ -932,10 +953,8 @@ def olt_dashboard(request: Request, background_tasks: BackgroundTasks, pon_id: s
 </div>
 
 <div class="modal fade" id="opticalModal" tabindex="-1"><div class="modal-dialog modal-dialog-centered"><div class="modal-content border-0 shadow"><div class="modal-header bg-dark text-white"><h5 class="modal-title fw-bold"><i class="fa-solid fa-signal text-info me-2"></i>ONU Optical Power</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div><div class="modal-body" id="opticalModalBody">লোড হচ্ছে...</div></div></div></div>
-
 <div class="modal fade" id="linkModal" tabindex="-1"><div class="modal-dialog modal-dialog-centered"><div class="modal-content border-0 shadow"><div class="modal-header bg-primary text-white"><h5 class="modal-title fw-bold">গ্রাহকের সাথে ONU লিংক করুন</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div>
 <form method="POST" action="/admin/olt/link"><div class="modal-body"><input type="hidden" name="pon_id" id="linkPon"><input type="hidden" name="onu_id" id="linkOnu"><input type="hidden" name="onu_sn" id="linkSn"><input type="hidden" name="back_pon" value="{h(pon_id)}"><p class="small text-muted" id="linkLabel"></p><label class="form-label fw-bold">গ্রাহক সিলেক্ট করুন:</label><select name="cust_id" class="form-select" required>{cust_options}</select></div><div class="modal-footer"><button type="submit" class="btn btn-primary fw-bold">লিংক সেভ করুন</button></div></form></div></div></div>
-
 <div class="modal fade" id="vlanModal" tabindex="-1"><div class="modal-dialog modal-dialog-centered"><div class="modal-content border-0 shadow"><div class="modal-header bg-dark text-white"><h5 class="modal-title fw-bold">কাস্টম VLAN / Profile সেট করুন</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div>
 <form method="POST" action="/admin/olt/change-vlan"><div class="modal-body"><input type="hidden" name="pon_id" id="vPon"><input type="hidden" name="onu_id" id="vOnu"><input type="hidden" name="back_pon" value="{h(pon_id)}"><p class="fw-bold" id="vLabel"></p><div class="mb-3"><label class="form-label fw-bold">Line Profile</label><select name="linename" id="vLine" class="form-select">{line_opts}</select></div><div class="mb-3"><label class="form-label fw-bold">Service Profile</label><select name="srvname" id="vSrv" class="form-select">{srv_opts}</select></div></div><div class="modal-footer"><button type="submit" class="btn btn-success fw-bold">VLAN সেভ করুন</button></div></form></div></div></div>
 
@@ -960,7 +979,8 @@ def olt_change_vlan(request: Request, pon_id: int = Form(...), onu_id: int = For
         return RedirectResponse(url="/login")
     try:
         get_olt_conn().set_onu_vlan_profile(pon_id, onu_id, linename, srvname)
-        return RedirectResponse(url=f"/admin/olt?pon_id={back_pon}&msg=GPON0/{pon_id}:{onu_id}+এর+VLAN+({linename})+সফলভাবে+পরিবর্তন+হয়েছে!", status_code=303)
+        _OLT_CACHE.clear()
+        return RedirectResponse(url=f"/admin/olt?pon_id={back_pon}&refresh=1&msg=GPON0/{pon_id}:{onu_id}+এর+VLAN+({linename})+সফলভাবে+পরিবর্তন+হয়েছে!", status_code=303)
     except Exception as e:
         return RedirectResponse(url=f"/admin/olt?pon_id={back_pon}&msg=VLAN+পরিবর্তন+ব্যর্থ:+{e}", status_code=303)
 
@@ -989,7 +1009,8 @@ def olt_reboot_onu(request: Request, pon_id: int, onu_id: int, back_pon: str = "
         return RedirectResponse(url="/login")
     try:
         get_olt_conn().reboot_onu(pon_id, onu_id)
-        return RedirectResponse(url=f"/admin/olt?pon_id={back_pon}&msg=GPON0/{pon_id}:{onu_id}+রিবুট+কমান্ড+পাঠানো+হয়েছে!", status_code=303)
+        _OLT_CACHE.clear()
+        return RedirectResponse(url=f"/admin/olt?pon_id={back_pon}&refresh=1&msg=GPON0/{pon_id}:{onu_id}+রিবুট+কমান্ড+পাঠানো+হয়েছে!", status_code=303)
     except Exception as e:
         return RedirectResponse(url=f"/admin/olt?pon_id={back_pon}&msg=Reboot+ব্যর্থ:+{e}", status_code=303)
 
@@ -1054,6 +1075,7 @@ def save_settings_action(request: Request, router_driver: str = Form("mikrotik_a
         database.set_setting(k, v)
     if mikrotik_pass.strip(): database.set_setting("mikrotik_pass", mikrotik_pass.strip())
     if olt_pass.strip(): database.set_setting("olt_pass", olt_pass.strip())
+    _clear_caches()
     if new_admin_password.strip():
         database.set_setting("admin_password", new_admin_password.strip())
         token = _get_serializer().dumps({"auth": True, "ph": _pass_hash(new_admin_password.strip())})
