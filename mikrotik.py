@@ -205,6 +205,7 @@ class MikrotikAPI(BaseRouterDriver):
                     "profile": attrs.get("profile", "default"),
                     "service": attrs.get("service", "pppoe"),
                     "caller_id": attrs.get("caller-id", ""),
+                    "last_caller_id": attrs.get("last-caller-id", ""),
                     "disabled": attrs.get("disabled", "false") == "true",
                     "comment": attrs.get("comment", ""),
                 })
